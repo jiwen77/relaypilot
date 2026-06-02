@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="${RELAYPILOT_VERSION:-0.1.1}"
+VERSION="${RELAYPILOT_VERSION:-0.1.2}"
 REPO="${REPO:-jiwen77/relaypilot}"
 RAW_REF="${RAW_REF:-main}"
 RAW_BASE="${RAW_BASE:-https://github.com/${REPO}/raw/${RAW_REF}}"
@@ -203,7 +203,7 @@ Usage:
   bash relaypilot.sh bot register
   bash relaypilot.sh install
   bash relaypilot.sh update
-  bash relaypilot.sh update --version v0.1.1 --restart-services
+  bash relaypilot.sh update --version v0.1.2 --restart-services
   bash relaypilot.sh leave-hub  # remove Agent service/Hub credentials, keep Reality/SS/sing-box
   bash relaypilot.sh uninstall --dry-run
   bash relaypilot.sh uninstall --yes
@@ -964,9 +964,18 @@ self_update() {
   mkdir -p "$INSTALL_DIR/bin" "$(dirname "$BIN_PATH")"
   [[ -f "$INSTALL_DIR/relaypilot.sh" ]] && cp -a "$INSTALL_DIR/relaypilot.sh" "$INSTALL_DIR/relaypilot.sh.prev"
   [[ -f "$INSTALL_DIR/bin/relaypilot" ]] && cp -a "$INSTALL_DIR/bin/relaypilot" "$INSTALL_DIR/bin/relaypilot.prev"
-  cp -a "$script_tmp" "$INSTALL_DIR/relaypilot.sh"
-  cp -a "$asset_tmp" "$INSTALL_DIR/bin/relaypilot"
-  ln -sf "$INSTALL_DIR/relaypilot.sh" "$BIN_PATH"
+  local script_dest core_dest script_new core_new
+  script_dest="$INSTALL_DIR/relaypilot.sh"
+  core_dest="$INSTALL_DIR/bin/relaypilot"
+  script_new="${script_dest}.new.$$"
+  core_new="${core_dest}.new.$$"
+  rm -f "$script_new" "$core_new"
+  cp -a "$script_tmp" "$script_new"
+  cp -a "$asset_tmp" "$core_new"
+  chmod +x "$script_new" "$core_new"
+  mv -f "$script_new" "$script_dest"
+  mv -f "$core_new" "$core_dest"
+  ln -sf "$script_dest" "$BIN_PATH"
   rm -rf "$tmp"
   unset RELAYPILOT_UPDATE_TMP
 

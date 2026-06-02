@@ -83,7 +83,7 @@ For Hub mode, the useful runtime commands are:
 /relaypilot_status all
 /relaypilot_status transit
 /relaypilot_endpoints transit
-/relaypilot_update transit v0.1.1
+/relaypilot_update transit v0.1.2
 /relaypilot_results [batch_id]
 ```
 
@@ -117,11 +117,11 @@ Registered commands:
 Hub update commands:
 
 ```text
-/relaypilot_update hub v0.1.1
-/relaypilot_update transit v0.1.1
-/relaypilot_update landing v0.1.1
-/relaypilot_update all v0.1.1
-/relaypilot_update transit-hk v0.1.1 --restart
+/relaypilot_update hub v0.1.2
+/relaypilot_update transit v0.1.2
+/relaypilot_update landing v0.1.2
+/relaypilot_update all v0.1.2
+/relaypilot_update transit-hk v0.1.2 --restart
 ```
 
 Use an explicit tag for normal operations. `latest` is accepted, but is best kept

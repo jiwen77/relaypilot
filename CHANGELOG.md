@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.2
+
+- Make self-update replace the Bash entrypoint and Go core atomically so running services do not fail with `Text file busy`.
+
 ## 0.1.1
 
 - Add short-lived visible Hub invites with remembered public Hub URL defaults.
