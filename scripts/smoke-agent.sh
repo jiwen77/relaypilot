@@ -187,6 +187,17 @@ RELAYPILOT_NO_ROOT=1 \
 bash ./relaypilot.sh install-hub-service \
   --host 127.0.0.1 \
   --port 8080 > "$ROOT/hub-service.out" 2> "$ROOT/hub-service.err"
+SYSTEMD_DIR="$ROOT/systemd" \
+BIN_PATH="$ROOT/bin/relaypilot" \
+STATE_DIR="$ROOT/hub-only-state" \
+CONF_DIR="$ROOT/missing-sing-box/conf" \
+SINGBOX_CONFIG_PATH="$ROOT/missing-sing-box/config.json" \
+HUB_SERVICE_NAME="relay-smoke-hub-no-singbox" \
+RELAYPILOT_PROFILE=small \
+RELAYPILOT_NO_ROOT=1 \
+bash ./relaypilot.sh install-hub-service \
+  --host 127.0.0.1 \
+  --port 18080 > "$ROOT/hub-service-no-singbox.out" 2> "$ROOT/hub-service-no-singbox.err"
 
 SYSTEMD_DIR="$ROOT/systemd" \
 BIN_PATH="$ROOT/bin/relaypilot" \
@@ -291,6 +302,11 @@ grep -q 'CPUQuota=25%' "$ROOT/systemd/relay-smoke-agent.service"
 grep -q -- '--topology-interval 300' "$ROOT/systemd/relay-smoke-agent.service"
 grep -q 'RestartSec=30s' "$ROOT/systemd/relay-smoke-hub.service"
 grep -q 'MemoryMax=128M' "$ROOT/systemd/relay-smoke-hub.service"
+grep -q 'relay-smoke-hub-no-singbox.service' "$ROOT/hub-service-no-singbox.out"
+if grep -q "$ROOT/missing-sing-box" "$ROOT/systemd/relay-smoke-hub-no-singbox.service"; then
+  echo "hub-only service should not include missing sing-box paths in ReadWritePaths" >&2
+  exit 1
+fi
 grep -q 'bot-daemon' "$ROOT/systemd/relay-smoke-tg.service"
 grep -q 'CPUQuota=25%' "$ROOT/systemd/relay-smoke-tg.service"
 

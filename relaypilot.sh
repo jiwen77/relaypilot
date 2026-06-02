@@ -596,9 +596,28 @@ backup_file_if_exists() {
   fi
 }
 
+append_unique_path() {
+  local var_name="$1" candidate="$2" existing
+  [[ -n "$candidate" && -d "$candidate" ]] || return 0
+  eval "existing=\" \${${var_name}[*]:-} \""
+  if [[ "$existing" != *" $candidate "* ]]; then
+    eval "${var_name}+=(\"\$candidate\")"
+  fi
+}
+
+systemd_read_write_paths() {
+  local paths=() config_parent
+  mkdir -p "$STATE_DIR" 2>/dev/null || true
+  append_unique_path paths "$STATE_DIR"
+  append_unique_path paths "$CONF_DIR"
+  config_parent="$(dirname "$SINGBOX_CONFIG_PATH")"
+  append_unique_path paths "$config_parent"
+  printf '%s' "${paths[*]}"
+}
+
 install_managed_service() {
   require_root
-  local name="$1" description="$2" exec_cmd="$3" memory_max="$4" cpu_quota="$5" service_path
+  local name="$1" description="$2" exec_cmd="$3" memory_max="$4" cpu_quota="$5" service_path read_write_paths
   if command -v systemctl >/dev/null 2>&1 && [[ -d "$SYSTEMD_DIR" ]]; then
     service_path="${SYSTEMD_DIR}/${name}.service"
     if [[ -e "$service_path" && "${FORCE_SERVICE_FILE:-}" != "1" ]]; then
@@ -606,6 +625,7 @@ install_managed_service() {
       return 0
     fi
     backup_file_if_exists "$service_path"
+    read_write_paths="$(systemd_read_write_paths)"
     cat > "$service_path" <<EOF_SERVICE
 [Unit]
 Description=${description}
@@ -626,7 +646,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=true
-ReadWritePaths=${STATE_DIR} ${CONF_DIR} $(dirname "$SINGBOX_CONFIG_PATH")
+ReadWritePaths=${read_write_paths}
 
 [Install]
 WantedBy=multi-user.target
