@@ -246,7 +246,10 @@ grep -q '资源限制' "$ROOT/service-menu.out"
 grep -q '更新 RelayPilot' "$ROOT/service-menu.out"
 grep -q 'relaypilot-agent' "$ROOT/service-menu.out"
 grep -q 'Hub 服务' "$ROOT/hub-service-menu.out"
-grep -q '清除失败状态' "$ROOT/hub-service-menu.out"
+if grep -q '清除失败状态' "$ROOT/hub-service-menu.out"; then
+  echo "service menu should hide systemd reset-failed as an automatic recovery detail" >&2
+  exit 1
+fi
 grep -q 'Agent 模式' "$ROOT/agent-direct-menu.out"
 grep -q '配置中转' "$ROOT/agent-direct-menu.out"
 grep -q '初始化/更新 Reality' "$ROOT/transit-menu.out"
