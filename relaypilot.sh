@@ -231,10 +231,12 @@ EOF
 prompt() {
   local var_name="$1" label="$2" default="${3:-}" value
   if [[ -n "$default" ]]; then
-    read -r -p "$label [$default]: " value || true
+    printf "%s [默认：%s%s%s]: " "$label" "$BOLD$CYAN" "$default" "$NC"
+    read -r value || true
     value="${value:-$default}"
   else
-    read -r -p "$label: " value || true
+    printf "%s: " "$label"
+    read -r value || true
   fi
   printf -v "$var_name" '%s' "$value"
 }
@@ -327,10 +329,12 @@ select_option() {
     fi
   done
   if [[ -n "$default" ]]; then
-    read -r -p "选择序号 [$default]: " choice || true
+    printf "选择序号 [默认：%s%s%s]: " "$BOLD$CYAN" "$default" "$NC"
+    read -r choice || true
     choice="${choice:-$default}"
   else
-    read -r -p "选择序号: " choice || true
+    printf "选择序号: "
+    read -r choice || true
   fi
   if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#values[@]} )); then
     printf -v "$var_name" '%s' "${values[$((choice - 1))]}"
@@ -340,9 +344,9 @@ select_option() {
 }
 
 confirm() {
-  local label="$1" default="${2:-y}" value suffix
-  [[ "$default" =~ ^[Yy]$ ]] && suffix="Y/n" || suffix="y/N"
-  read -r -p "$label [$suffix]: " value || true
+  local label="$1" default="${2:-y}" value
+  printf "%s [默认：%s%s%s]: " "$label" "$BOLD$CYAN" "$default" "$NC"
+  read -r value || true
   value="${value:-$default}"
   [[ "$value" =~ ^[Yy]$ ]]
 }
@@ -606,6 +610,78 @@ hub_public_config_get() {
   file="$(hub_public_config_path)"
   [[ -f "$file" ]] || return 1
   awk -F= -v key="$key" '$1 == key { print substr($0, index($0, "=") + 1); exit }' "$file"
+}
+
+hub_tls_first_san() {
+  local cert="${STATE_DIR}/hub-tls/hub.crt" sans
+  [[ -f "$cert" ]] || return 1
+  command -v openssl >/dev/null 2>&1 || return 1
+  sans="$(openssl x509 -in "$cert" -noout -ext subjectAltName 2>/dev/null || true)"
+  awk '
+    {
+      for (i = 1; i <= NF; i++) {
+        gsub(/,/, "", $i)
+        if ($i ~ /^DNS:/) {
+          sub(/^DNS:/, "", $i)
+          if ($i != "localhost") { print $i; found = 1; exit }
+          local = $i
+        }
+      }
+    }
+    END { if (!found && local != "") print local }
+  ' <<<"$sans"
+}
+
+hub_tls_first_ip_san() {
+  local cert="${STATE_DIR}/hub-tls/hub.crt" sans
+  [[ -f "$cert" ]] || return 1
+  command -v openssl >/dev/null 2>&1 || return 1
+  sans="$(openssl x509 -in "$cert" -noout -ext subjectAltName 2>/dev/null || true)"
+  awk '
+    {
+      for (i = 1; i <= NF; i++) {
+        gsub(/,/, "", $i)
+        if ($i ~ /^Address:/) {
+          sub(/^Address:/, "", $i)
+          if ($i != "127.0.0.1" && $i != "::1") { print $i; found = 1; exit }
+          local = $i
+        }
+      }
+    }
+    END { if (!found && local != "") print local }
+  ' <<<"$sans"
+}
+
+hub_service_arg() {
+  local flag="$1" file="${SYSTEMD_DIR}/${HUB_SERVICE_NAME}.service"
+  [[ -f "$file" ]] || return 1
+  awk -v flag="$flag" '
+    /^ExecStart=/ {
+      for (i = 1; i <= NF; i++) {
+        if ($i == flag && (i + 1) <= NF) { print $(i + 1); exit }
+      }
+    }
+  ' "$file"
+}
+
+hub_public_host_default() {
+  local value
+  value="$(hub_public_config_get HUB_PUBLIC_HOST 2>/dev/null || true)"
+  [[ -n "$value" ]] && { printf '%s\n' "$value"; return 0; }
+  value="$(hub_tls_first_san 2>/dev/null || true)"
+  [[ -n "$value" ]] && { printf '%s\n' "$value"; return 0; }
+  value="$(hub_tls_first_ip_san 2>/dev/null || true)"
+  [[ -n "$value" ]] && { printf '%s\n' "$value"; return 0; }
+  return 1
+}
+
+hub_public_port_default() {
+  local value
+  value="$(hub_public_config_get HUB_PUBLIC_PORT 2>/dev/null || true)"
+  [[ -n "$value" ]] && { printf '%s\n' "$value"; return 0; }
+  value="$(hub_service_arg --port 2>/dev/null || true)"
+  [[ -n "$value" ]] && { printf '%s\n' "$value"; return 0; }
+  return 1
 }
 
 save_hub_public_config() {
@@ -1298,11 +1374,16 @@ hub_enroll_code() { core_cmd hub-create-enroll-code --state-dir "$STATE_DIR" "$@
 hub_enroll_wizard() {
   require_root
   local agent_id="${AGENT_ID:-}" role="${AGENT_ROLE:-transit}" public_host="${HUB_PUBLIC_HOST:-}" ttl="${HUB_ENROLL_TTL:-10m}" port="${HUB_PORT:-8443}"
-  local saved_public_host saved_port
-  saved_public_host="$(hub_public_config_get HUB_PUBLIC_HOST 2>/dev/null || true)"
-  saved_port="$(hub_public_config_get HUB_PUBLIC_PORT 2>/dev/null || true)"
-  [[ -z "$public_host" && -n "$saved_public_host" ]] && public_host="$saved_public_host"
-  [[ "${HUB_PORT:-}" == "" && -n "$saved_port" ]] && port="$saved_port"
+  local default_public_host default_port public_host_locked=0
+  default_public_host="$(hub_public_host_default 2>/dev/null || true)"
+  default_port="$(hub_public_port_default 2>/dev/null || true)"
+  if [[ -z "$public_host" && -n "$default_public_host" ]]; then
+    public_host="$default_public_host"
+    public_host_locked=1
+  elif [[ -n "$public_host" ]]; then
+    public_host_locked=1
+  fi
+  [[ "${HUB_PORT:-}" == "" && -n "$default_port" ]] && port="$default_port"
   title "Create agent invite"
   select_option role "节点角色" "$role" \
     "transit|中转节点|接入用户，转发到落地" \
@@ -1314,12 +1395,19 @@ hub_enroll_wizard() {
     default_agent_id="transit-$(hostname 2>/dev/null || echo node)"
   fi
   [[ -z "$agent_id" ]] && prompt agent_id "Agent id（英文数字短横线，例如 ${default_agent_id}）" "$default_agent_id"
-  prompt public_host "Hub 公网 IP/域名（空=自动检测当前公网 IP）" "$public_host"
   local input_port
-  input_port="$(port_from_host_input "$public_host")"
-  [[ -n "$input_port" ]] && port="$input_port"
-  [[ -n "$public_host" ]] && public_host="$(host_only "$public_host")"
-  prompt port "Hub HTTPS 端口" "$port"
+  if [[ "$public_host_locked" == "1" ]]; then
+    input_port="$(port_from_host_input "$public_host")"
+    [[ -n "$input_port" ]] && port="$input_port"
+    [[ -n "$public_host" ]] && public_host="$(host_only "$public_host")"
+    printf "Hub URL： %s%s%s\n" "$BOLD" "https://${public_host}:${port}" "$NC"
+  else
+    prompt public_host "Hub 公网 IP/域名（空=自动检测当前公网 IP）" "$public_host"
+    input_port="$(port_from_host_input "$public_host")"
+    [[ -n "$input_port" ]] && port="$input_port"
+    [[ -n "$public_host" ]] && public_host="$(host_only "$public_host")"
+    prompt port "Hub HTTPS 端口" "$port"
+  fi
   if ! valid_port "$port"; then
     err "Hub HTTPS 端口必须是 1-65535：$port"
     return 1
@@ -1634,8 +1722,8 @@ hub_quick_setup() {
   require_root
   local public_host="${HUB_PUBLIC_HOST:-}" port="${HUB_PORT:-8443}" listen_host="${HUB_LISTEN_HOST:-0.0.0.0}"
   local saved_public_host saved_port saved_listen_host
-  saved_public_host="$(hub_public_config_get HUB_PUBLIC_HOST 2>/dev/null || true)"
-  saved_port="$(hub_public_config_get HUB_PUBLIC_PORT 2>/dev/null || true)"
+  saved_public_host="$(hub_public_host_default 2>/dev/null || true)"
+  saved_port="$(hub_public_port_default 2>/dev/null || true)"
   saved_listen_host="$(hub_public_config_get HUB_LISTEN_HOST 2>/dev/null || true)"
   [[ -z "$public_host" && -n "$saved_public_host" ]] && public_host="$saved_public_host"
   [[ "${HUB_PORT:-}" == "" && -n "$saved_port" ]] && port="$saved_port"
@@ -1869,10 +1957,10 @@ service_enabled_label() {
 menu_color_status() {
   local value="$1"
   case "$value" in
-    运行中|开机启动) printf '%s%s%s' "$GREEN" "$value" "$NC" ;;
-    失败|异常) printf '%s%s%s' "$RED" "$value" "$NC" ;;
-    处理中|混合部署) printf '%s%s%s' "$YELLOW" "$value" "$NC" ;;
-    未启用|未安装|未运行|未知) printf '%s%s%s' "$DIM" "$value" "$NC" ;;
+    运行中|开机启动) printf '%s%s● %s%s' "$BOLD" "$GREEN" "$value" "$NC" ;;
+    失败|异常) printf '%s%s✕ %s%s' "$BOLD" "$RED" "$value" "$NC" ;;
+    处理中|混合部署) printf '%s%s● %s%s' "$BOLD" "$YELLOW" "$value" "$NC" ;;
+    未启用|未安装|未运行|未知) printf '%s○ %s%s' "$DIM" "$value" "$NC" ;;
     *) printf '%s' "$value" ;;
   esac
 }

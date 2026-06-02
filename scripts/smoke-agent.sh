@@ -102,9 +102,9 @@ printf '0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
   bash ./relaypilot.sh transit > "$ROOT/transit-menu.out"
 
 STATE_DIR="$ROOT/state" bash ./relaypilot.sh hub-init-tls --host hub.example > "$ROOT/hub-tls.out"
-printf '2\nsmoke-interactive\nhub.example\n8443\n10m\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
+printf '2\nsmoke-interactive\n10m\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
   bash ./relaypilot.sh hub-enroll > "$ROOT/hub-enroll.out"
-printf '1\nsmoke-url\nhttps://hub.example:9443\n\n10m\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
+printf '1\nsmoke-url\n10m\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" HUB_PUBLIC_HOST="https://hub.example:9443" \
   bash ./relaypilot.sh hub-enroll > "$ROOT/hub-enroll-url.out"
 RELAYPILOT_PROFILE=tiny bash ./relaypilot.sh resource-profile > "$ROOT/profile-tiny.out"
 bash ./relaypilot.sh migrate-state --from "$ROOT/state" --to "$ROOT/migrated-state" --dry-run > "$ROOT/migrate-dry.out"
@@ -136,7 +136,10 @@ HUB_PUBLIC_HOST="https://hub.quick.example:9443" \
 RELAYPILOT_PROFILE=tiny \
 bash ./relaypilot.sh hub-quick-setup > "$ROOT/hub-quick.out" 2> "$ROOT/hub-quick.err"
 printf '\nstored-transit\n\n\n10m\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/quick-hub" \
-  bash ./relaypilot.sh hub-enroll > "$ROOT/hub-enroll-stored-default.out"
+  bash ./relaypilot.sh hub-enroll > "$ROOT/hub-enroll-stored-default.out" 2>&1
+rm -f "$ROOT/quick-hub/hub-public.env"
+printf '\ninferred-transit\n\n\n10m\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/quick-hub" SYSTEMD_DIR="$ROOT/systemd" \
+  bash ./relaypilot.sh hub-enroll > "$ROOT/hub-enroll-inferred-default.out" 2>&1
 SYSTEMD_DIR="$ROOT/systemd" \
 BIN_PATH="$ROOT/bin/relaypilot" \
 STATE_DIR="$ROOT/state" \
@@ -230,7 +233,7 @@ grep -q 'dry_run' "$ROOT/tg-send.out"
 grep -q 'landing-hk-ss' "$ROOT/tg-dispatch.out"
 
 grep -q 'RelayPilot v.* · 当前：未配置' "$ROOT/agent-menu.out"
-grep -q 'Hub：未启用.*Agent：未启用.*代理：未启用' "$ROOT/agent-menu.out"
+grep -q 'Hub：○ 未启用.*Agent：○ 未启用.*代理：○ 未启用' "$ROOT/agent-menu.out"
 grep -q 'Hub 模式' "$ROOT/agent-menu.out"
 grep -q 'Agent 模式' "$ROOT/agent-menu.out"
 grep -q '卸载/重置' "$ROOT/agent-menu.out"
@@ -283,7 +286,19 @@ grep -q '未写入任何 Hub 配置' "$ROOT/hub-quick-cancel.out"
 grep -q 'Hub 配置预览' "$ROOT/hub-quick.out"
 grep -q 'Hub URL 给 agent 使用：https://hub.quick.example:9443' "$ROOT/hub-quick.out"
 grep -q '证书 SAN 包含：hub.quick.example' "$ROOT/hub-quick.out"
+grep -q 'Hub URL： https://hub.quick.example:9443' "$ROOT/hub-enroll-stored-default.out"
+grep -q '默认：' "$ROOT/hub-enroll-stored-default.out"
 grep -q '"hub_url": "https://hub.quick.example:9443"' "$ROOT/hub-enroll-stored-default.out"
+if grep -q 'Hub 公网 IP/域名' "$ROOT/hub-enroll-stored-default.out" || grep -q 'Hub HTTPS 端口' "$ROOT/hub-enroll-stored-default.out"; then
+  echo "stored Hub public URL should be reused without prompting for host/port" >&2
+  exit 1
+fi
+grep -q 'Hub URL： https://hub.quick.example:9443' "$ROOT/hub-enroll-inferred-default.out"
+grep -q '"hub_url": "https://hub.quick.example:9443"' "$ROOT/hub-enroll-inferred-default.out"
+if grep -q 'Hub 公网 IP/域名' "$ROOT/hub-enroll-inferred-default.out" || grep -q 'Hub HTTPS 端口' "$ROOT/hub-enroll-inferred-default.out"; then
+  echo "existing Hub TLS/service should infer Hub public URL without prompting for host/port" >&2
+  exit 1
+fi
 grep -q 'hub-daemon' "$ROOT/systemd/relaypilot-hub.service"
 grep -q -- '--port 9443' "$ROOT/systemd/relaypilot-hub.service"
 grep -q -- '--host 0.0.0.0' "$ROOT/systemd/relaypilot-hub.service"
