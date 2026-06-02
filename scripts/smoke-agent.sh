@@ -94,6 +94,8 @@ printf '1\n0\n0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
   bash ./relaypilot.sh > "$ROOT/hub-menu.out"
 printf '3\n0\n0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
   bash ./relaypilot.sh > "$ROOT/service-menu.out"
+printf '3\n2\n0\n0\n0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
+  bash ./relaypilot.sh > "$ROOT/hub-service-menu.out"
 printf '0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
   bash ./relaypilot.sh agent > "$ROOT/agent-direct-menu.out"
 printf '0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
@@ -243,6 +245,8 @@ grep -q '状态 / 启动' "$ROOT/service-menu.out"
 grep -q '资源限制' "$ROOT/service-menu.out"
 grep -q '更新 RelayPilot' "$ROOT/service-menu.out"
 grep -q 'relaypilot-agent' "$ROOT/service-menu.out"
+grep -q 'Hub 服务' "$ROOT/hub-service-menu.out"
+grep -q '清除失败状态' "$ROOT/hub-service-menu.out"
 grep -q 'Agent 模式' "$ROOT/agent-direct-menu.out"
 grep -q '配置中转' "$ROOT/agent-direct-menu.out"
 grep -q '初始化/更新 Reality' "$ROOT/transit-menu.out"

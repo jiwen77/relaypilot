@@ -1741,6 +1741,18 @@ service_action() {
   fi
 }
 
+service_reset_failed() {
+  local name="$1"
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl reset-failed "$name"
+  elif command -v rc-service >/dev/null 2>&1; then
+    info "OpenRC 无需 reset-failed；如服务异常，直接停止/启动即可。"
+  else
+    warn "找不到 systemctl/rc-service，无法清除失败状态。"
+    return 1
+  fi
+}
+
 service_exists() {
   local name="$1"
   if command -v systemctl >/dev/null 2>&1; then
@@ -1937,8 +1949,9 @@ service_control_menu() {
     menu_item 3 "重启"
     menu_item 4 "停止"
     menu_item 5 "日志"
+    menu_item 6 "清除失败状态"
     menu_back
-    menu_prompt choice "0-5"
+    menu_prompt choice "0-6"
     case "${choice:-}" in
       1) menu_action service_action "$name" status ;;
       2) menu_action service_action "$name" start ;;
@@ -1947,6 +1960,7 @@ service_control_menu() {
       5)
         menu_action show_service_logs "$name"
         ;;
+      6) menu_action service_reset_failed "$name" ;;
       0) return 0 ;;
       *) menu_invalid_choice ;;
     esac
