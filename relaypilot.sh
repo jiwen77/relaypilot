@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="${RELAYPILOT_VERSION:-0.1.3}"
+VERSION="${RELAYPILOT_VERSION:-0.1.4}"
 REPO="${REPO:-jiwen77/relaypilot}"
 RAW_REF="${RAW_REF:-main}"
 RAW_BASE="${RAW_BASE:-https://github.com/${REPO}/raw/${RAW_REF}}"
@@ -203,7 +203,7 @@ Usage:
   bash relaypilot.sh bot register
   bash relaypilot.sh install
   bash relaypilot.sh update
-  bash relaypilot.sh update --version v0.1.3 --restart-services
+  bash relaypilot.sh update --version v0.1.4 --restart-services
   bash relaypilot.sh leave-hub  # remove Agent service/Hub credentials, keep Reality/SS/sing-box
   bash relaypilot.sh uninstall --dry-run
   bash relaypilot.sh uninstall --yes
@@ -795,11 +795,18 @@ EOF_SERVICE
       return 0
     fi
     backup_file_if_exists "$service_path"
+    local openrc_command openrc_args
+    openrc_command="${exec_cmd%% *}"
+    if [[ "$exec_cmd" == *" "* ]]; then
+      openrc_args="${exec_cmd#* }"
+    else
+      openrc_args=""
+    fi
     cat > "$service_path" <<EOF_SERVICE
 #!/sbin/openrc-run
 name="${description}"
-command="/bin/sh"
-command_args="-c 'exec ${exec_cmd}'"
+command="${openrc_command}"
+command_args="${openrc_args}"
 command_background="yes"
 pidfile="/run/${name}.pid"
 supervisor=supervise-daemon
@@ -1768,9 +1775,9 @@ install_agent_service() {
   prepare_service_profile
   local exec_cmd
   if [[ -n "$enrollment_file" ]]; then
-    exec_cmd="${BIN_PATH} agent-poll-loop --state-dir ${STATE_DIR} --enrollment-file ${enrollment_file} --conf ${conf} --interval ${interval} --topology-interval ${topology_interval}"
+    exec_cmd="${GO_CORE} agent-poll-loop --state-dir ${STATE_DIR} --enrollment-file ${enrollment_file} --conf ${conf} --interval ${interval} --topology-interval ${topology_interval}"
   else
-    exec_cmd="${BIN_PATH} agent-poll-loop --state-dir ${STATE_DIR} --hub-url ${hub_url} --agent-id ${agent_id} --role ${role} --token-file ${token_file} --conf ${conf} --interval ${interval} --topology-interval ${topology_interval}"
+    exec_cmd="${GO_CORE} agent-poll-loop --state-dir ${STATE_DIR} --hub-url ${hub_url} --agent-id ${agent_id} --role ${role} --token-file ${token_file} --conf ${conf} --interval ${interval} --topology-interval ${topology_interval}"
     [[ -n "$ca_cert" ]] && exec_cmd+=" --ca-cert ${ca_cert}"
     [[ -n "$client_cert" ]] && exec_cmd+=" --client-cert ${client_cert}"
     [[ -n "$client_key" ]] && exec_cmd+=" --client-key ${client_key}"
@@ -1796,7 +1803,7 @@ install_hub_service() {
   done
   prepare_service_profile
   local exec_cmd
-  exec_cmd="${BIN_PATH} hub-daemon --state-dir ${STATE_DIR} --host ${host} --port ${port} --quiet"
+  exec_cmd="${GO_CORE} hub-daemon --state-dir ${STATE_DIR} --host ${host} --port ${port} --quiet"
   [[ -n "$tls_cert" ]] && exec_cmd+=" --tls-cert ${tls_cert}"
   [[ -n "$tls_key" ]] && exec_cmd+=" --tls-key ${tls_key}"
   [[ -n "$client_ca" ]] && exec_cmd+=" --client-ca ${client_ca}"
@@ -1815,7 +1822,7 @@ install_tg_hub_service() {
   done
   prepare_service_profile
   local exec_cmd
-  exec_cmd="${BIN_PATH} bot-daemon --state-dir ${STATE_DIR} --interval ${interval} --timeout ${timeout} --quiet"
+  exec_cmd="${GO_CORE} bot-daemon --state-dir ${STATE_DIR} --interval ${interval} --timeout ${timeout} --quiet"
   install_managed_service "$TG_SERVICE_NAME" "RelayPilot bot hub daemon" "$exec_cmd" "$TG_SERVICE_MEMORY_MAX" "$TG_SERVICE_CPU_QUOTA"
 }
 

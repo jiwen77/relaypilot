@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.4
+
+- Install managed Hub/Agent/Bot services against the Go core directly so OpenRC restarts do not leave orphaned Bash/core child processes.
+
 ## 0.1.3
 
 - Omit the sing-box Shadowsocks outbound `network` field for dual `tcp,udp` endpoints so transit binding remains compatible with sing-box 1.12.
