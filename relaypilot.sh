@@ -127,7 +127,7 @@ menu_header() {
   printf "\n%s================================================%s\n" "$CYAN" "$NC"
   printf "%s%s%*s%s\n" "$CYAN" "$BOLD" $(( (48 + ${#heading}) / 2 )) "$heading" "$NC"
   printf "%s================================================%s\n" "$CYAN" "$NC"
-  [[ -n "$meta_line" ]] && printf "%s\n" "$meta_line"
+  [[ -n "$meta_line" ]] && printf "%s%s%s\n" "$DIM" "$meta_line" "$NC"
   [[ -n "$status_line" ]] && printf "%s\n" "$status_line"
   echo
 }
@@ -1585,7 +1585,10 @@ menu_status_line() {
     agent="未启用"
     proxy="未启用"
   fi
-  printf 'Hub：%s   Agent：%s   代理：%s' "$(menu_color_status "$hub")" "$(menu_color_status "$agent")" "$(menu_color_status "$proxy")"
+  printf '%sHub：%s%s   %sAgent：%s%s   %s代理：%s%s' \
+    "$DIM" "$NC" "$(menu_color_status "$hub")" \
+    "$DIM" "$NC" "$(menu_color_status "$agent")" \
+    "$DIM" "$NC" "$(menu_color_status "$proxy")"
 }
 
 menu_title() {
@@ -1594,7 +1597,7 @@ menu_title() {
   status="$(menu_status_line)"
   heading="${section} · 当前：${mode}"
   if [[ "$section" == "RelayPilot" ]]; then
-    meta="安装目录：${INSTALL_DIR}   状态目录：${STATE_DIR}"
+    meta=$'安装目录：'"${INSTALL_DIR}"$'\n状态目录：'"${STATE_DIR}"
   else
     meta="状态目录：${STATE_DIR}"
   fi
