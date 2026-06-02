@@ -2434,11 +2434,12 @@ func loadHubServerTLSConfig(certPath, keyPath, clientCAPath string, requireClien
 			return nil, err
 		}
 		cfg.ClientCAs = pool
-		if requireClientCert {
-			cfg.ClientAuth = tls.VerifyClientCertIfGiven
-		} else {
-			cfg.ClientAuth = tls.VerifyClientCertIfGiven
-		}
+		// The Hub currently serves enrollment and authenticated Agent APIs on the
+		// same listener. Enrollment is the bootstrap step that issues the Agent's
+		// client certificate, so the TLS handshake must allow clients without a
+		// certificate. Authenticated Agent APIs still require and verify the client
+		// certificate at the HTTP layer when --require-client-cert is set.
+		cfg.ClientAuth = tls.VerifyClientCertIfGiven
 	}
 	return cfg, nil
 }
