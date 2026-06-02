@@ -135,6 +135,8 @@ RELAYPILOT_NO_ROOT=1 \
 HUB_PUBLIC_HOST="https://hub.quick.example:9443" \
 RELAYPILOT_PROFILE=tiny \
 bash ./relaypilot.sh hub-quick-setup > "$ROOT/hub-quick.out" 2> "$ROOT/hub-quick.err"
+printf '\nstored-transit\n\n\n10m\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/quick-hub" \
+  bash ./relaypilot.sh hub-enroll > "$ROOT/hub-enroll-stored-default.out"
 SYSTEMD_DIR="$ROOT/systemd" \
 BIN_PATH="$ROOT/bin/relaypilot" \
 STATE_DIR="$ROOT/state" \
@@ -281,6 +283,7 @@ grep -q '未写入任何 Hub 配置' "$ROOT/hub-quick-cancel.out"
 grep -q 'Hub 配置预览' "$ROOT/hub-quick.out"
 grep -q 'Hub URL 给 agent 使用：https://hub.quick.example:9443' "$ROOT/hub-quick.out"
 grep -q '证书 SAN 包含：hub.quick.example' "$ROOT/hub-quick.out"
+grep -q '"hub_url": "https://hub.quick.example:9443"' "$ROOT/hub-enroll-stored-default.out"
 grep -q 'hub-daemon' "$ROOT/systemd/relaypilot-hub.service"
 grep -q -- '--port 9443' "$ROOT/systemd/relaypilot-hub.service"
 grep -q -- '--host 0.0.0.0' "$ROOT/systemd/relaypilot-hub.service"

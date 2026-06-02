@@ -45,6 +45,7 @@ HUB_ALERT_TIMER_NAME="${HUB_ALERT_TIMER_NAME:-relaypilot-alert-offline}"
 HUB_ALERT_TIMER_INTERVAL="${HUB_ALERT_TIMER_INTERVAL:-1h}"
 HUB_ALERT_THRESHOLD_SECONDS="${HUB_ALERT_THRESHOLD_SECONDS:-86400}"
 HUB_ALERT_SNOOZE_SECONDS="${HUB_ALERT_SNOOZE_SECONDS:-86400}"
+HUB_PUBLIC_CONFIG_NAME="${HUB_PUBLIC_CONFIG_NAME:-hub-public.env}"
 
 if [[ -t 1 ]]; then
   GREEN=$'\033[32m'; YELLOW=$'\033[33m'; RED=$'\033[31m'; CYAN=$'\033[36m'; BOLD=$'\033[1m'; DIM=$'\033[2m'; NC=$'\033[0m'
@@ -596,6 +597,31 @@ backup_file_if_exists() {
   fi
 }
 
+hub_public_config_path() {
+  printf '%s/%s\n' "$STATE_DIR" "$HUB_PUBLIC_CONFIG_NAME"
+}
+
+hub_public_config_get() {
+  local key="$1" file
+  file="$(hub_public_config_path)"
+  [[ -f "$file" ]] || return 1
+  awk -F= -v key="$key" '$1 == key { print substr($0, index($0, "=") + 1); exit }' "$file"
+}
+
+save_hub_public_config() {
+  local public_host="$1" cert_host="$2" port="$3" listen_host="$4" file
+  file="$(hub_public_config_path)"
+  mkdir -p "$STATE_DIR"
+  cat > "$file" <<EOF_HUB_PUBLIC
+HUB_PUBLIC_HOST=${public_host}
+HUB_PUBLIC_CERT_HOST=${cert_host}
+HUB_PUBLIC_PORT=${port}
+HUB_LISTEN_HOST=${listen_host}
+HUB_PUBLIC_URL=https://${public_host}:${port}
+EOF_HUB_PUBLIC
+  chmod 0644 "$file" 2>/dev/null || true
+}
+
 append_unique_path() {
   local var_name="$1" candidate="$2" existing
   [[ -n "$candidate" && -d "$candidate" ]] || return 0
@@ -934,6 +960,7 @@ reset_hub_state() {
   remove_path "$STATE_DIR/hub-agent-tokens.json"
   remove_path "$STATE_DIR/hub-auth-nonces.json"
   remove_path "$STATE_DIR/hub-enroll-codes.json"
+  remove_path "$(hub_public_config_path)"
   reload_service_manager
 }
 
@@ -1271,6 +1298,11 @@ hub_enroll_code() { core_cmd hub-create-enroll-code --state-dir "$STATE_DIR" "$@
 hub_enroll_wizard() {
   require_root
   local agent_id="${AGENT_ID:-}" role="${AGENT_ROLE:-transit}" public_host="${HUB_PUBLIC_HOST:-}" ttl="${HUB_ENROLL_TTL:-10m}" port="${HUB_PORT:-8443}"
+  local saved_public_host saved_port
+  saved_public_host="$(hub_public_config_get HUB_PUBLIC_HOST 2>/dev/null || true)"
+  saved_port="$(hub_public_config_get HUB_PUBLIC_PORT 2>/dev/null || true)"
+  [[ -z "$public_host" && -n "$saved_public_host" ]] && public_host="$saved_public_host"
+  [[ "${HUB_PORT:-}" == "" && -n "$saved_port" ]] && port="$saved_port"
   title "Create agent invite"
   select_option role "节点角色" "$role" \
     "transit|中转节点|接入用户，转发到落地" \
@@ -1601,6 +1633,13 @@ detect_public_ip() {
 hub_quick_setup() {
   require_root
   local public_host="${HUB_PUBLIC_HOST:-}" port="${HUB_PORT:-8443}" listen_host="${HUB_LISTEN_HOST:-0.0.0.0}"
+  local saved_public_host saved_port saved_listen_host
+  saved_public_host="$(hub_public_config_get HUB_PUBLIC_HOST 2>/dev/null || true)"
+  saved_port="$(hub_public_config_get HUB_PUBLIC_PORT 2>/dev/null || true)"
+  saved_listen_host="$(hub_public_config_get HUB_LISTEN_HOST 2>/dev/null || true)"
+  [[ -z "$public_host" && -n "$saved_public_host" ]] && public_host="$saved_public_host"
+  [[ "${HUB_PORT:-}" == "" && -n "$saved_port" ]] && port="$saved_port"
+  [[ "${HUB_LISTEN_HOST:-}" == "" && -n "$saved_listen_host" ]] && listen_host="$saved_listen_host"
   local detected="" tls_args=()
   title "Hub HTTPS/mTLS quick setup"
   if [[ -z "$public_host" ]]; then
@@ -1652,6 +1691,7 @@ hub_quick_setup() {
     --tls-key "$STATE_DIR/hub-tls/hub.key" \
     --client-ca "$STATE_DIR/hub-tls/ca.crt" \
     --require-client-cert
+  save_hub_public_config "$public_host_for_url" "$cert_host" "$port" "$listen_host"
   echo
   info "Hub URL 给 agent 使用：https://${public_host_for_url}:${port}"
   info "下一步：在 Hub 菜单生成 agent invite；agent 端粘贴 invite 即可连接。"
