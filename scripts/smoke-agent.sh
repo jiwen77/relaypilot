@@ -104,6 +104,21 @@ STATE_DIR="$ROOT/ip-state" RELAYPILOT_NO_ROOT=1 bash ./relaypilot.sh agent ip-mo
   --mode dynamic \
   --public-ip-interval 1800 > "$ROOT/agent-ip-mode.out"
 
+STATE_DIR="$ROOT/state" bash ./relaypilot.sh public-entry-set \
+  --use shadowsocks \
+  --name hk \
+  --host front.example \
+  --public-port 443 \
+  --local-port 2443 > "$ROOT/public-entry-set.out"
+STATE_DIR="$ROOT/state" bash ./relaypilot.sh public-entry-set \
+  --use wireguard \
+  --name hk \
+  --host front.example \
+  --public-port 51820 \
+  --local-port 50123 \
+  --network udp > "$ROOT/public-entry-wg.out"
+STATE_DIR="$ROOT/state" bash ./relaypilot.sh public-entry-list > "$ROOT/public-entry-list.out"
+
 printf '2\n0\n0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
   bash ./relaypilot.sh > "$ROOT/agent-menu.out"
 printf '1\n0\n0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
@@ -266,8 +281,13 @@ grep -q '彻底卸载（含状态/代理）' "$ROOT/uninstall-menu.out"
 grep -q '配置中转' "$ROOT/agent-menu.out"
 grep -q '配置落地' "$ROOT/agent-menu.out"
 grep -q '粘贴 invite' "$ROOT/agent-menu.out"
+grep -q '公网入口' "$ROOT/agent-menu.out"
 grep -q '"ip_mode": "dynamic"' "$ROOT/ip-state/agent-enrollment.json"
 grep -q '"public_ip_interval_seconds": 1800' "$ROOT/ip-state/agent-enrollment.json"
+grep -q '"host": "front.example"' "$ROOT/state/public-entries.json"
+grep -q '"public_port": 51820' "$ROOT/state/public-entries.json"
+grep -q 'shadowsocks.*hk.*front.example:443' "$ROOT/public-entry-list.out"
+grep -q 'wireguard.*hk.*front.example:51820' "$ROOT/public-entry-list.out"
 grep -q 'Hub 模式' "$ROOT/hub-menu.out"
 grep -q '初始化 Hub' "$ROOT/hub-menu.out"
 grep -q '生成 invite' "$ROOT/hub-menu.out"

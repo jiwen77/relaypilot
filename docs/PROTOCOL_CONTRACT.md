@@ -79,6 +79,35 @@ directly. In `mesh` mode Hub provisions a dedicated WireGuard transit↔landing
 /30 and the transit endpoint `server` becomes the landing overlay IP; the
 original landing address may be retained in endpoint state as `direct_server`.
 
+## Public entry v1
+
+Agents may store `/etc/relaypilot/public-entries.json` for nodes whose
+externally reachable service address differs from local config, such as a
+fronting datacenter static IP with port forwarding.
+
+```json
+{
+  "kind": "relaypilot/public-entries",
+  "version": 1,
+  "entries": {
+    "shadowsocks:hk": {
+      "use": "shadowsocks",
+      "name": "hk",
+      "host": "front.example",
+      "public_port": 443,
+      "local_port": 2443,
+      "network": "tcp"
+    }
+  }
+}
+```
+
+Public entries are reachability hints, not IP telemetry. A Shadowsocks entry
+overrides exported endpoint `server`/`server_port` while preserving
+`local_server`/`local_server_port`. A WireGuard entry is returned with
+`export_endpoint` results so the Hub can set the transit mesh peer endpoint to
+the forwarded UDP host/port.
+
 ## Removed agent tombstone v1
 
 When a node is intentionally removed from Hub, the active registry entry is

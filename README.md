@@ -121,6 +121,23 @@ Link modes:
 - `direct` (default): transit dials the landing endpoint server/port directly.
 - `mesh`: Hub provisions a dedicated WireGuard /30 between transit and landing, then binds the Shadowsocks outbound to the landing overlay IP. It does not route default traffic and does not relay data through Hub; `wg-quick` must already be available on both agents.
 
+If a node is behind a fronting datacenter/static IP with port forwarding, set
+the Agent's **public entry**. This is different from IP reporting: IP mode is
+only Hub visibility; public entry is the real externally reachable service
+address that RelayPilot exports to other nodes.
+
+```bash
+# front.example:443 -> landing local :2443
+relaypilot public-entry-set --use shadowsocks --name jp --host front.example --public-port 443 --local-port 2443
+
+# Only needed for mesh when WireGuard UDP is also forwarded.
+relaypilot public-entry-set --use wireguard --name jp --host front.example --public-port 51820 --local-port 50123 --network udp
+```
+
+`landing-install-ss` records the Shadowsocks public entry from its prompts
+automatically. Use Agent mode -> 公网入口 when the forwarded address changes or
+when you need to add the WireGuard entry for mesh.
+
 Manual import remains available for standalone/lab use:
 
 ```bash
@@ -201,6 +218,11 @@ relaypilot landing-install-ss        # landing host
 # If a node's public IP may change, enable low-frequency dynamic reporting:
 relaypilot agent ip-mode --mode dynamic --public-ip-interval 600
 
+# If a fronting static IP/domain forwards to the actual landing box,
+# declare the external service address on that Agent:
+relaypilot public-entry-set --use shadowsocks --name hk --host front.example --public-port 443 --local-port 2443
+relaypilot public-entry-set --use wireguard --name hk --host front.example --public-port 51820 --local-port 50123 --network udp
+
 # After both agents are online, link transit -> landing from the Hub.
 # Hub asks the landing agent for the full endpoint over the signed control plane,
 # then queues a bind task to the transit agent. No endpoint JSON copy is needed.
@@ -240,6 +262,14 @@ heartbeat metadata, while `dynamic` mode adds a short public-IP HTTPS probe
 every 10 minutes by default, with a fallback endpoint only on failure. Hub
 records the reported/observed IP for visibility; it does not automatically
 rewrite Reality/Shadowsocks/WireGuard configs.
+
+Public entry is the separate reachability setting for forwarded nodes. Example:
+if `front.example:443` forwards to a landing machine's local `:2443`, the
+landing Agent should store a Shadowsocks public entry; Hub linking will export
+`front.example:443` instead of the local address. Mesh mode can also use a
+WireGuard public entry when UDP forwarding exists; if UDP is blocked, keep
+`direct` mode.
+
 To install or inspect bounded services, use the menu path:
 
 ```bash

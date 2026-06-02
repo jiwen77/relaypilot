@@ -55,6 +55,7 @@ const (
 	hubTLSServerCertName           = "hub.crt"
 	hubTLSServerKeyName            = "hub.key"
 	agentEnrollmentName            = "agent-enrollment.json"
+	publicEntriesName              = "public-entries.json"
 	defaultStateDir                = "/etc/relaypilot"
 	defaultConfDir                 = "/etc/sing-box/conf"
 	defaultHubTLSDays              = 3650
@@ -442,6 +443,35 @@ func run(args []string) error {
 		for _, item := range items {
 			fmt.Printf("%s\t%s\t%s\t%s:%v\t%s\n", str(item["name"]), str(item["protocol"]), str(item["tag"]), str(item["server"]), item["server_port"], str(item["path"]))
 		}
+		return nil
+	case "public-entry-set":
+		fs := flag.NewFlagSet(args[0], flag.ExitOnError)
+		stateDir := fs.String("state-dir", defaultStateDir, "state directory")
+		use := fs.String("use", "", "entry use: reality, shadowsocks, or wireguard")
+		name := fs.String("name", "", "entry name")
+		host := fs.String("host", "", "public host or domain")
+		publicPort := fs.Int("public-port", 0, "public port")
+		localPort := fs.Int("local-port", 0, "local listen port")
+		network := fs.String("network", "", "tcp or udp")
+		_ = fs.Parse(args[1:])
+		res, err := setPublicEntry(*stateDir, publicEntryOptions{Use: *use, Name: *name, Host: *host, PublicPort: *publicPort, LocalPort: *localPort, Network: *network})
+		if err != nil {
+			return err
+		}
+		return printJSON(res)
+	case "public-entry-list":
+		fs := flag.NewFlagSet(args[0], flag.ExitOnError)
+		stateDir := fs.String("state-dir", defaultStateDir, "state directory")
+		asJSON := fs.Bool("json", false, "print JSON")
+		_ = fs.Parse(args[1:])
+		entries, err := listPublicEntries(*stateDir)
+		if err != nil {
+			return err
+		}
+		if *asJSON {
+			return printJSON(obj{"state_dir": *stateDir, "entries": entries})
+		}
+		fmt.Println(formatPublicEntriesText(entries))
 		return nil
 	case "inspect-conf":
 		fs := flag.NewFlagSet(args[0], flag.ExitOnError)
@@ -1017,6 +1047,8 @@ Commands:
   render-outbound ENDPOINT_JSON
   import-endpoint [--state-dir DIR] ENDPOINT_JSON
   export-endpoint [--state-dir DIR] NAME
+  public-entry-set --use shadowsocks|wireguard|reality --name NAME --host HOST --public-port PORT --local-port PORT
+  public-entry-list [--state-dir DIR] [--json]
   bind-transit --conf PATH --endpoint ENDPOINT_JSON [--auth-user USER]
   list-endpoints [--state-dir DIR] [--json]
   inspect-conf [--conf PATH] [--json]
@@ -3811,7 +3843,13 @@ func queueBindEndpointFromExportResult(stateDir string, exportTask, result obj) 
 			return errors.New("mesh link missing landing overlay ip")
 		}
 		if str(meshTransit["peer_endpoint"]) == "" {
-			meshTransit["peer_endpoint"] = net.JoinHostPort(str(endpoint["server"]), strconv.Itoa(int(int64Value(firstNonNil(meshTransit["peer_endpoint_port"], meshSummary["port"])))))
+			if publicEndpoint, err := publicWireGuardEndpointFromExportResult(result); err != nil {
+				return err
+			} else if publicEndpoint != "" {
+				meshTransit["peer_endpoint"] = publicEndpoint
+			} else {
+				meshTransit["peer_endpoint"] = net.JoinHostPort(str(endpoint["server"]), strconv.Itoa(int(int64Value(firstNonNil(meshTransit["peer_endpoint_port"], meshSummary["port"])))))
+			}
 		}
 		endpoint["direct_server"] = endpoint["server"]
 		endpoint["direct_server_port"] = endpoint["server_port"]
@@ -6699,6 +6737,11 @@ func executeExportEndpointTask(task obj, stateDir string) obj {
 		"endpoint":      endpoint,
 		"text":          fmt.Sprintf("endpoint exported: %s", endpoint["name"]),
 	}
+	if publicEntries, err := exportEndpointPublicEntries(stateDir, endpointName); err != nil {
+		return obj{"success": false, "command": "export_endpoint", "error": err.Error()}
+	} else if len(publicEntries) > 0 {
+		result["public_entries"] = publicEntries
+	}
 	if len(meshSummary) > 0 {
 		result["mesh"] = meshSummary
 		result["text"] = fmt.Sprintf("mesh ready and endpoint exported: %s", endpoint["name"])
@@ -7567,6 +7610,253 @@ func endpointStorePath(stateDir, name string) (string, error) {
 	return filepath.Join(stateDir, "endpoints", name+".json"), nil
 }
 
+type publicEntryOptions struct {
+	Use        string
+	Name       string
+	Host       string
+	PublicPort int
+	LocalPort  int
+	Network    string
+}
+
+func publicEntriesPath(stateDir string) string {
+	return filepath.Join(stateDir, publicEntriesName)
+}
+
+func normalizePublicEntryUse(use string) (string, error) {
+	use = strings.ToLower(strings.TrimSpace(use))
+	switch use {
+	case "reality", "vless":
+		return "reality", nil
+	case "shadowsocks", "ss":
+		return "shadowsocks", nil
+	case "wireguard", "wg", "mesh":
+		return "wireguard", nil
+	default:
+		return "", fmt.Errorf("public entry use must be reality, shadowsocks, or wireguard: %q", use)
+	}
+}
+
+func publicEntryKey(use, name string) string {
+	return use + ":" + name
+}
+
+func loadPublicEntryStore(stateDir string) (obj, error) {
+	path := publicEntriesPath(stateDir)
+	data, err := loadJSON(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return obj{"kind": "relaypilot/public-entries", "version": version, "entries": obj{}}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if asObj(data["entries"]) == nil {
+		data["entries"] = obj{}
+	}
+	return data, nil
+}
+
+func setPublicEntry(stateDir string, opts publicEntryOptions) (obj, error) {
+	if stateDir == "" {
+		stateDir = defaultStateDir
+	}
+	use, err := normalizePublicEntryUse(opts.Use)
+	if err != nil {
+		return nil, err
+	}
+	name, err := ensureSafeName(firstNonEmpty(opts.Name, "default"), "public_entry.name")
+	if err != nil {
+		return nil, err
+	}
+	host, hostPort, err := normalizePublicEntryHost(opts.Host)
+	if err != nil {
+		return nil, err
+	}
+	if opts.PublicPort <= 0 && hostPort > 0 {
+		opts.PublicPort = hostPort
+	}
+	publicPort, err := ensurePort(opts.PublicPort, "public_entry.public_port")
+	if err != nil {
+		return nil, err
+	}
+	localPort := 0
+	if opts.LocalPort > 0 {
+		localPort, err = ensurePort(opts.LocalPort, "public_entry.local_port")
+		if err != nil {
+			return nil, err
+		}
+	}
+	network := strings.ToLower(strings.TrimSpace(opts.Network))
+	if network == "" {
+		if use == "wireguard" {
+			network = "udp"
+		} else {
+			network = "tcp"
+		}
+	}
+	if network != "tcp" && network != "udp" {
+		return nil, errors.New("public entry network must be tcp or udp")
+	}
+	entry := obj{
+		"use":         use,
+		"name":        name,
+		"host":        host,
+		"public_port": publicPort,
+		"network":     network,
+		"updated_at":  now(),
+	}
+	if localPort > 0 {
+		entry["local_port"] = localPort
+	}
+	store, err := loadPublicEntryStore(stateDir)
+	if err != nil {
+		return nil, err
+	}
+	entries := asObj(store["entries"])
+	entries[publicEntryKey(use, name)] = entry
+	store["entries"] = entries
+	if err := writeJSON(publicEntriesPath(stateDir), store, 0o600); err != nil {
+		return nil, err
+	}
+	return entry, nil
+}
+
+func normalizePublicEntryHost(raw string) (string, int, error) {
+	raw = strings.TrimRight(strings.TrimSpace(raw), "/")
+	if raw == "" {
+		return "", 0, errors.New("public entry host is required")
+	}
+	if strings.Contains(raw, "://") {
+		u, err := url.Parse(raw)
+		if err != nil || u.Host == "" || u.Hostname() == "" {
+			return "", 0, fmt.Errorf("public entry host must be a DNS name, IP, or URL host, got %q", raw)
+		}
+		if u.Path != "" && u.Path != "/" {
+			return "", 0, fmt.Errorf("public entry host must not include a path: %q", raw)
+		}
+		port, err := parseOptionalPort(u.Port())
+		if err != nil {
+			return "", 0, fmt.Errorf("invalid public entry port: %q", u.Port())
+		}
+		return u.Hostname(), port, nil
+	}
+	if strings.Contains(raw, "/") {
+		return "", 0, fmt.Errorf("public entry host must be a DNS name or IP, got %q", raw)
+	}
+	if host, portString, err := net.SplitHostPort(raw); err == nil {
+		port, err := parseOptionalPort(portString)
+		if err != nil {
+			return "", 0, fmt.Errorf("invalid public entry port: %q", portString)
+		}
+		return strings.Trim(host, "[]"), port, nil
+	}
+	return strings.Trim(raw, "[]"), 0, nil
+}
+
+func listPublicEntries(stateDir string) ([]obj, error) {
+	store, err := loadPublicEntryStore(stateDir)
+	if err != nil {
+		return nil, err
+	}
+	entries := asObj(store["entries"])
+	out := make([]obj, 0, len(entries))
+	for _, raw := range entries {
+		out = append(out, asObj(raw))
+	}
+	sort.Slice(out, func(i, j int) bool {
+		left := publicEntryKey(str(out[i]["use"]), str(out[i]["name"]))
+		right := publicEntryKey(str(out[j]["use"]), str(out[j]["name"]))
+		return left < right
+	})
+	return out, nil
+}
+
+func formatPublicEntriesText(entries []obj) string {
+	if len(entries) == 0 {
+		return "(no public entries)"
+	}
+	var b strings.Builder
+	for _, entry := range entries {
+		local := ""
+		if int64Value(entry["local_port"]) > 0 {
+			local = fmt.Sprintf(" -> local:%d", int64Value(entry["local_port"]))
+		}
+		fmt.Fprintf(&b, "%s\t%s\t%s:%v\t%s%s\n", str(entry["use"]), str(entry["name"]), str(entry["host"]), entry["public_port"], str(entry["network"]), local)
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func findPublicEntry(stateDir, use, name string) (obj, error) {
+	normalizedUse, err := normalizePublicEntryUse(use)
+	if err != nil {
+		return nil, err
+	}
+	name = firstNonEmpty(strings.TrimSpace(name), "default")
+	store, err := loadPublicEntryStore(stateDir)
+	if err != nil {
+		return nil, err
+	}
+	entries := asObj(store["entries"])
+	for _, key := range []string{publicEntryKey(normalizedUse, name), publicEntryKey(normalizedUse, "default")} {
+		entry := asObj(entries[key])
+		if len(entry) > 0 {
+			return entry, nil
+		}
+	}
+	return nil, nil
+}
+
+func applyPublicEntryToEndpoint(stateDir string, endpoint obj) (obj, error) {
+	if str(endpoint["protocol"]) != "shadowsocks" {
+		return endpoint, nil
+	}
+	entry, err := findPublicEntry(stateDir, "shadowsocks", str(endpoint["name"]))
+	if err != nil || len(entry) == 0 {
+		return endpoint, err
+	}
+	out := obj{}
+	for k, v := range endpoint {
+		out[k] = v
+	}
+	out["local_server"] = endpoint["server"]
+	out["local_server_port"] = endpoint["server_port"]
+	out["server"] = entry["host"]
+	out["server_port"] = entry["public_port"]
+	out["public_entry"] = entry
+	return validateEndpoint(out, true)
+}
+
+func exportEndpointPublicEntries(stateDir, name string) (obj, error) {
+	out := obj{}
+	wireguard, err := findPublicEntry(stateDir, "wireguard", name)
+	if err != nil {
+		return nil, err
+	}
+	if len(wireguard) > 0 {
+		out["wireguard"] = wireguard
+	}
+	return out, nil
+}
+
+func publicWireGuardEndpointFromExportResult(result obj) (string, error) {
+	entry := asObj(asObj(result["public_entries"])["wireguard"])
+	if len(entry) == 0 {
+		return "", nil
+	}
+	if str(entry["use"]) != "" && str(entry["use"]) != "wireguard" {
+		return "", fmt.Errorf("wireguard public entry has invalid use: %q", entry["use"])
+	}
+	host := strings.TrimSpace(str(entry["host"]))
+	if host == "" {
+		return "", errors.New("wireguard public entry host is empty")
+	}
+	port, err := ensurePort(entry["public_port"], "wireguard public entry public_port")
+	if err != nil {
+		return "", err
+	}
+	return net.JoinHostPort(host, strconv.Itoa(port)), nil
+}
+
 func importEndpoint(endpointPath, stateDir string) (string, error) {
 	endpoint, err := loadEndpoint(endpointPath, true)
 	if err != nil {
@@ -7584,7 +7874,11 @@ func exportEndpoint(stateDir, name string) (obj, error) {
 	if err != nil {
 		return nil, err
 	}
-	return loadEndpoint(path, true)
+	endpoint, err := loadEndpoint(path, true)
+	if err != nil {
+		return nil, err
+	}
+	return applyPublicEntryToEndpoint(stateDir, endpoint)
 }
 
 func endpointToOutbound(endpoint obj) (obj, error) {

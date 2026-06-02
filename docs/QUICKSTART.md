@@ -90,6 +90,7 @@ relaypilot
 2) Agent 模式
 3) 粘贴 Hub invite 并安装 Agent 服务
 # role=landing -> 安装/更新 Shadowsocks
+# 前置机房/端口转发 -> 6) 公网入口
 ```
 
 Shortcut command:
@@ -99,6 +100,15 @@ bash relaypilot.sh landing-install-ss
 ```
 
 It writes the landing Shadowsocks inbound and stores the endpoint secret under `/etc/relaypilot/endpoints/<name>.json`. With Hub linking you do not copy this endpoint by hand; the Hub fetches it from the landing agent and sends it to the transit agent as a protected task payload.
+
+If the landing service is reached through a fronting IP/domain with port
+forwarding, store the externally reachable address on the Agent:
+
+```bash
+relaypilot public-entry-set --use shadowsocks --name hk --host front.example --public-port 443 --local-port 2443
+# Mesh/WireGuard only if UDP is forwarded too:
+relaypilot public-entry-set --use wireguard --name hk --host front.example --public-port 51820 --local-port 50123 --network udp
+```
 
 Manual standalone binding remains available:
 
@@ -185,6 +195,7 @@ relaypilot agent enroll --invite 'PASTE_INVITE' --install-service
 relaypilot transit-init-reality   # transit data plane
 relaypilot landing-install-ss     # landing data plane
 relaypilot agent ip-mode --mode dynamic --public-ip-interval 600  # optional
+relaypilot public-entry-set --use shadowsocks --name hk --host front.example --public-port 443 --local-port 2443  # optional forwarding
 relaypilot agent poll-once \
   --enrollment-file /etc/relaypilot/agent-enrollment.json
 ```
@@ -215,6 +226,8 @@ JSON by hand. In `direct` mode the transit dials the landing endpoint server
 directly. In `mesh` mode Hub provisions a dedicated WireGuard transit↔landing
 link first and then points the transit outbound at the landing overlay IP; it
 requires `wg-quick` on both agents and does not use Hub as a data relay.
+When a landing Agent has public-entry records, Hub uses those forwarded
+host/ports for exported Shadowsocks endpoints and WireGuard mesh peer endpoints.
 
 In Hub mode `/relaypilot_status` is Hub-only. Use `/relaypilot_status all` or
 `/relaypilot_status transit-hk` when you explicitly want to target agents.

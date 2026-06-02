@@ -397,6 +397,98 @@ func TestHubLinkTransitLandingMeshModeWritesOverlayEndpoint(t *testing.T) {
 	}
 }
 
+func TestPublicEntryOverridesExportedLandingEndpointAndMeshPeer(t *testing.T) {
+	root := t.TempDir()
+	hubState := filepath.Join(root, "hub")
+	landingState := filepath.Join(root, "landing")
+	wgDir := filepath.Join(root, "wg")
+	endpoint := obj{
+		"kind":        endpointKind,
+		"version":     version,
+		"name":        "jp",
+		"protocol":    "shadowsocks",
+		"server":      "10.0.0.8",
+		"server_port": 2443,
+		"method":      "2022-blake3-aes-128-gcm",
+		"password":    "MDEyMzQ1Njc4OWFiY2RlZg==",
+		"tag":         "landing-jp-ss",
+		"network":     "tcp,udp",
+	}
+	if err := writeJSON(filepath.Join(landingState, "endpoints", "jp.json"), endpoint, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := setPublicEntry(landingState, publicEntryOptions{Use: "shadowsocks", Name: "jp", Host: "front.example", PublicPort: 443, LocalPort: 2443, Network: "tcp"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := setPublicEntry(landingState, publicEntryOptions{Use: "wireguard", Name: "jp", Host: "front.example", PublicPort: 51820, LocalPort: 50123, Network: "udp"}); err != nil {
+		t.Fatal(err)
+	}
+	reg := defaultHubRegistry()
+	reg["agents"] = obj{
+		"transit-la": obj{"kind": agentRegistrationKind, "version": version, "id": "transit-la", "role": "transit", "name": "LA Transit", "transport": "poll"},
+		"landing-jp": obj{
+			"kind":      agentRegistrationKind,
+			"version":   version,
+			"id":        "landing-jp",
+			"role":      "landing",
+			"name":      "JP Landing",
+			"transport": "poll",
+			"topology": obj{"endpoints": []any{
+				obj{"name": "jp", "protocol": "shadowsocks", "server": "10.0.0.8", "server_port": 2443, "tag": "landing-jp-ss"},
+			}},
+		},
+	}
+	if err := saveHubRegistry(hubState, reg); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := issueHubAgentToken(hubState, "landing-jp", "landing-token"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hubDispatchCommand(hubState, "/link transit-la landing-jp user-jp --mode mesh --mesh-cidr 10.99.0.0/30 --mesh-port 50123 --mesh-no-up --mesh-config-dir "+wgDir); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(&hubServer{stateDir: hubState, quiet: true})
+	defer srv.Close()
+	if _, err := agentPollOnce(srv.URL, "landing-jp", "landing-token", "landing", landingState, filepath.Join(root, "landing-conf"), 1, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	tasks, err := listHubTasks(hubState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bindQueued obj
+	for _, task := range tasks {
+		if str(task["command"]) == "bind_endpoint" {
+			bindQueued = task
+		}
+	}
+	if len(bindQueued) == 0 {
+		t.Fatalf("bind task not queued: %#v", tasks)
+	}
+	queuedEndpoint := asObj(asObj(bindQueued["payload"])["endpoint"])
+	if queuedEndpoint["direct_server"] != "front.example" || int64Value(queuedEndpoint["direct_server_port"]) != 443 {
+		t.Fatalf("public entry did not override exported endpoint: %#v", queuedEndpoint)
+	}
+	meshTransit := asObj(asObj(bindQueued["payload"])["mesh_transit"])
+	if str(meshTransit["peer_endpoint"]) != "front.example:51820" {
+		t.Fatalf("public entry did not override mesh peer endpoint: %#v", meshTransit)
+	}
+}
+
+func TestSetPublicEntryNormalizesHostPortAndDefaultsNetwork(t *testing.T) {
+	stateDir := t.TempDir()
+	entry, err := setPublicEntry(stateDir, publicEntryOptions{Use: "wg", Name: "jp", Host: "https://front.example:51820"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if str(entry["use"]) != "wireguard" || str(entry["host"]) != "front.example" || int64Value(entry["public_port"]) != 51820 || str(entry["network"]) != "udp" {
+		t.Fatalf("normalized entry = %#v", entry)
+	}
+	if _, err := setPublicEntry(stateDir, publicEntryOptions{Use: "shadowsocks", Name: "jp", Host: "front.example/path", PublicPort: 443}); err == nil {
+		t.Fatal("expected path-bearing host to be rejected")
+	}
+}
+
 func TestEnsureWireGuardMeshRefusesUnmanagedConfig(t *testing.T) {
 	root := t.TempDir()
 	privateKey, publicKey, err := generateWireGuardKeypair()

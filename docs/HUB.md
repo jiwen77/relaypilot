@@ -98,6 +98,7 @@ relaypilot
 1) 配置中转节点    # 初始化/更新 Reality 或手动绑定
 2) 配置落地节点    # 安装/更新 Shadowsocks
 3) 粘贴 Hub invite 并安装 Agent 服务
+6) 公网入口        # 前置机房/端口转发时设置
 ```
 
 Non-interactive equivalent:
@@ -122,6 +123,20 @@ relaypilot agent ip-mode --mode dynamic --public-ip-interval 600
 The Hub also records the source IP it observes from each heartbeat. These fields
 are for visibility and future automation only; changing static/dynamic mode does
 not rewrite existing Reality, Shadowsocks, or WireGuard configuration.
+
+For a node behind a fronting datacenter/static IP with port forwarding, configure
+the Agent public entry instead of relying on IP mode:
+
+```bash
+# front.example:443 -> landing local :2443
+relaypilot public-entry-set --use shadowsocks --name hk --host front.example --public-port 443 --local-port 2443
+
+# Mesh/WireGuard only when UDP forwarding exists:
+relaypilot public-entry-set --use wireguard --name hk --host front.example --public-port 51820 --local-port 50123 --network udp
+```
+
+Public entry changes exported service addresses and mesh peer endpoints. IP
+mode only reports address metadata to Hub.
 
 ### Link transit to landing
 
@@ -156,6 +171,12 @@ Mesh mode provisions one dedicated WireGuard interface on each agent, routes
 only the peer /32, then rewrites the transit outbound server to the landing
 overlay IP. Hub only coordinates keys/tasks; data does not relay through Hub.
 Install `wireguard-tools`/`wg-quick` first on both agents.
+
+If a landing Agent has a Shadowsocks public entry, Hub uses that forwarded
+host/port for direct mode and preserves the original local address as
+`local_server`. If it also has a WireGuard public entry, mesh mode uses that
+forwarded UDP host/port as the transit peer endpoint. Without the WireGuard
+entry, mesh falls back to the exported landing address and mesh port.
 
 The flow is automatic but still safe and explicit:
 

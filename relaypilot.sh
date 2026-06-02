@@ -185,8 +185,11 @@ Usage:
   bash relaypilot.sh agent enroll --bundle 'PASTE_BUNDLE'
   bash relaypilot.sh agent join
   bash relaypilot.sh agent ip-mode
+  bash relaypilot.sh agent public-entry
   bash relaypilot.sh agent poll-once --enrollment-file /etc/relaypilot/agent-enrollment.json
   bash relaypilot.sh agent install-service --enrollment-file /etc/relaypilot/agent-enrollment.json
+  bash relaypilot.sh public-entry-set --use shadowsocks --name jp --host front.example --public-port 443 --local-port 2443
+  bash relaypilot.sh public-entry-list
   bash relaypilot.sh install-hub-service --host 0.0.0.0 --port 8443 --tls-cert /etc/relaypilot/hub-tls/hub.crt --tls-key /etc/relaypilot/hub-tls/hub.key --client-ca /etc/relaypilot/hub-tls/ca.crt --require-client-cert
   bash relaypilot.sh install-bot-service
   bash relaypilot.sh install-alert-timer
@@ -435,7 +438,7 @@ singbox_bin() {
 
 go_core_supports() {
   case "$1" in
-    generate-ss-password|migrate-state|tg-config|tg-status|tg-commands|tg-register-commands|tg-get-commands|tg-delete-commands|tg-dispatch|tg-send|render-landing-ss|ensure-transit-reality|validate-endpoint|render-outbound|import-endpoint|export-endpoint|bind-transit|list-endpoints|inspect-conf|hub-agent-export|hub-import-agent|hub-agents|hub-remove-agent|hub-removed-agents|hub-alert-offline|hub-alerts|hub-alert-callback|hub-recover-tasks|hub-issue-token|hub-init-tls|hub-issue-agent-cert|hub-provision-agent|hub-create-enroll-code|hub-enroll-code|agent-enroll|agent-set-ip-mode|hub-rotate-token|hub-revoke-token|hub-tokens|hub-dispatch|hub-tasks|hub-results|hub-daemon|bot-daemon|agent-poll-once|agent-poll-loop) return 0 ;;
+    generate-ss-password|migrate-state|tg-config|tg-status|tg-commands|tg-register-commands|tg-get-commands|tg-delete-commands|tg-dispatch|tg-send|render-landing-ss|ensure-transit-reality|validate-endpoint|render-outbound|import-endpoint|export-endpoint|public-entry-set|public-entry-list|bind-transit|list-endpoints|inspect-conf|hub-agent-export|hub-import-agent|hub-agents|hub-remove-agent|hub-removed-agents|hub-alert-offline|hub-alerts|hub-alert-callback|hub-recover-tasks|hub-issue-token|hub-init-tls|hub-issue-agent-cert|hub-provision-agent|hub-create-enroll-code|hub-enroll-code|agent-enroll|agent-set-ip-mode|hub-rotate-token|hub-revoke-token|hub-tokens|hub-dispatch|hub-tasks|hub-results|hub-daemon|bot-daemon|agent-poll-once|agent-poll-loop) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -1089,6 +1092,7 @@ remove_relaypilot_proxy_fragments() {
 reset_agent_state() {
   reset_agent_control_state
   remove_path "$STATE_DIR/endpoints"
+  remove_path "$STATE_DIR/public-entries.json"
   remove_relaypilot_proxy_fragments
   reload_service_manager
 }
@@ -1206,6 +1210,118 @@ list_endpoints() { core_cmd list-endpoints --state-dir "$STATE_DIR"; }
 show_endpoint() { local name="${1:-}"; [[ -z "$name" ]] && prompt name "endpoint 名称" "${ENDPOINT_NAME:-landing}"; core_cmd export-endpoint --state-dir "$STATE_DIR" "$name"; }
 inspect_conf() { local conf="${1:-}"; [[ -z "$conf" ]] && { if [[ -d "$CONF_DIR" ]]; then conf="$CONF_DIR"; else conf="$SINGBOX_CONFIG_PATH"; fi; }; core_cmd inspect-conf --conf "$conf"; }
 migrate_state() { core_cmd migrate-state "$@"; }
+public_entry_set() { core_cmd public-entry-set --state-dir "$STATE_DIR" "$@"; }
+public_entry_list() { core_cmd public-entry-list --state-dir "$STATE_DIR" "$@"; }
+
+json_file_string_value() {
+  local file="$1" key="$2"
+  [[ -f "$file" ]] || return 0
+  sed -n 's/.*"'"$key"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$file" | head -n1
+}
+
+json_file_number_value() {
+  local file="$1" key="$2"
+  [[ -f "$file" ]] || return 0
+  sed -n 's/.*"'"$key"'"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$file" | head -n1
+}
+
+config_inbound_listen_port() {
+  local file="$1" tag="$2"
+  [[ -f "$file" ]] || return 0
+  awk -v tag="$tag" '
+    $0 ~ "\"tag\"[[:space:]]*:[[:space:]]*\"" tag "\"" { seen = 1 }
+    seen && $0 ~ "\"listen_port\"[[:space:]]*:" {
+      gsub(/[^0-9]/, "", $0)
+      print
+      exit
+    }
+  ' "$file"
+}
+
+first_endpoint_file() {
+  local file
+  [[ -d "$STATE_DIR/endpoints" ]] || return 0
+  for file in "$STATE_DIR"/endpoints/*.json; do
+    [[ -f "$file" ]] || continue
+    printf '%s\n' "$file"
+    return 0
+  done
+}
+
+default_endpoint_name() {
+  local file
+  file="$(first_endpoint_file)"
+  [[ -n "$file" ]] && basename "$file" .json
+}
+
+public_entry_wizard() {
+  require_root
+  local use="$1" label="$2" network="$3" name host public_port local_port endpoint_file input_port default_name default_host default_public_port default_local_port
+  endpoint_file="$(first_endpoint_file)"
+  case "$use" in
+    reality)
+      default_name="${TRANSIT_INBOUND_TAG:-vless-in}"
+      default_host="${REALITY_PUBLIC_HOST:-${PUBLIC_ENTRY_HOST:-}}"
+      default_local_port="${REALITY_LOCAL_PORT:-${TRANSIT_PORT:-$(config_inbound_listen_port "$CONF_DIR/00-relaypilot-reality.json" "$default_name")}}"
+      default_public_port="${REALITY_PUBLIC_PORT:-${default_local_port:-443}}"
+      ;;
+    shadowsocks)
+      default_name="${PUBLIC_ENTRY_NAME:-${LANDING_NAME:-$(default_endpoint_name)}}"
+      default_host="${PUBLIC_ENTRY_HOST:-$(json_file_string_value "$endpoint_file" server)}"
+      default_public_port="${PUBLIC_ENTRY_PUBLIC_PORT:-$(json_file_number_value "$endpoint_file" server_port)}"
+      default_local_port="${PUBLIC_ENTRY_LOCAL_PORT:-${LANDING_PORT:-$default_public_port}}"
+      ;;
+    wireguard)
+      default_name="${PUBLIC_ENTRY_NAME:-$(default_endpoint_name)}"
+      [[ -z "$default_name" ]] && default_name="default"
+      default_host="${PUBLIC_ENTRY_HOST:-}"
+      default_public_port="${PUBLIC_ENTRY_PUBLIC_PORT:-${MESH_PUBLIC_PORT:-${MESH_PORT:-}}}"
+      default_local_port="${PUBLIC_ENTRY_LOCAL_PORT:-${MESH_LOCAL_PORT:-${MESH_PORT:-$default_public_port}}}"
+      ;;
+  esac
+  [[ -z "$default_name" ]] && default_name="default"
+  title "配置${label}公网入口"
+  prompt name "名称" "$default_name"
+  prompt host "对外 IP/域名" "$default_host"
+  input_port="$(port_from_host_input "$host")"
+  if [[ -n "$input_port" ]]; then
+    default_public_port="$input_port"
+    host="$(host_only "$host")"
+  fi
+  prompt public_port "对外端口" "$default_public_port"
+  if ! valid_port "$public_port"; then
+    err "对外端口必须是 1-65535：$public_port"
+    return 1
+  fi
+  prompt local_port "本机监听端口" "${default_local_port:-$public_port}"
+  if [[ -n "$local_port" ]] && ! valid_port "$local_port"; then
+    err "本机监听端口必须是 1-65535：$local_port"
+    return 1
+  fi
+  public_entry_set --use "$use" --name "$name" --host "$(host_only "$host")" --public-port "$public_port" --local-port "${local_port:-0}" --network "$network"
+  info "公网入口已保存：${name} ${host}:${public_port} -> local:${local_port:-0}/${network}"
+}
+
+public_entry_menu() {
+  require_root
+  while true; do
+    menu_title "公网入口"
+    menu_item 1 "配置 Reality 入口"
+    menu_item 2 "配置 Shadowsocks 入口"
+    menu_item 3 "配置 WireGuard 入口"
+    menu_item 4 "查看公网入口"
+    menu_back
+    menu_prompt choice "0-4"
+    case "${choice:-}" in
+      1) menu_action public_entry_wizard reality "Reality" tcp ;;
+      2) menu_action public_entry_wizard shadowsocks "Shadowsocks" tcp ;;
+      3) menu_action public_entry_wizard wireguard "WireGuard" udp ;;
+      4) menu_action public_entry_list ;;
+      0) return 0 ;;
+      *) menu_invalid_choice ;;
+    esac
+  done
+}
 
 transit_init_reality() {
   require_root
@@ -1259,6 +1375,11 @@ landing_install_ss() {
     --method "$method" --password "$password" \
     --inbound-tag "$inbound_tag" --endpoint-tag "$endpoint_tag" \
     --config-output "$SINGBOX_CONFIG_PATH" --endpoint-output "$endpoint_file"
+  if public_entry_set --use shadowsocks --name "$name" --host "$server" --public-port "$server_port" --local-port "$listen_port" --network tcp >/dev/null; then
+    info "公网入口已记录：${server}:${server_port} -> local:${listen_port}"
+  else
+    warn "公网入口记录失败，可稍后在 Agent 模式 -> 公网入口 中重设。"
+  fi
   info "落地配置已写入：$SINGBOX_CONFIG_PATH"
   info "endpoint 已写入：$endpoint_file"
   service_check "$SINGBOX_CONFIG_PATH"
@@ -1951,10 +2072,11 @@ agent_mode_menu() {
     menu_item 3 "粘贴 invite"
     menu_item 4 "接入信息"
     menu_item 5 "IP 模式"
-    menu_item 6 "退出 Hub 托管（保留程序/代理）"
-    menu_item 7 "重置 Agent 和代理配置"
+    menu_item 6 "公网入口"
+    menu_item 7 "退出 Hub 托管（保留程序/代理）"
+    menu_item 8 "重置 Agent 和代理配置"
     menu_back
-    menu_prompt choice "0-7"
+    menu_prompt choice "0-8"
     case "${choice:-}" in
       1) transit_menu ;;
       2) landing_menu ;;
@@ -1963,8 +2085,9 @@ agent_mode_menu() {
         menu_action show_agent_enrollment
         ;;
       5) menu_action agent_ip_mode_wizard ;;
-      6) menu_action reset_agent_control_menu_action ;;
-      7) menu_action reset_agent_menu_action ;;
+      6) public_entry_menu ;;
+      7) menu_action reset_agent_control_menu_action ;;
+      8) menu_action reset_agent_menu_action ;;
       0) return 0 ;;
       *) menu_invalid_choice ;;
     esac
@@ -2425,7 +2548,7 @@ reset_hub_menu_action() {
 reset_agent_menu_action() {
   title "重置 Agent 和代理配置"
   printf "  将停止并移除：%s, %s\n" "$AGENT_SERVICE_NAME" "$SERVICE_NAME"
-  printf "  将删除 Agent 接入状态：%s/agent-*, %s/endpoints\n" "$STATE_DIR" "$STATE_DIR"
+  printf "  将删除 Agent 接入状态：%s/agent-*, %s/endpoints, %s/public-entries.json\n" "$STATE_DIR" "$STATE_DIR" "$STATE_DIR"
   printf "  将删除代理片段：%s/*relaypilot*.json\n" "$CONF_DIR"
   printf "  将删除 WireGuard mesh：%s 内 RelayPilot 标记配置\n" "$MESH_CONFIG_DIR"
   printf "  不删除 sing-box 主配置：%s\n" "$SINGBOX_CONFIG_PATH"
@@ -2537,6 +2660,7 @@ main() {
       enroll) shift; agent_enroll "$@" ;;
       join) shift; agent_join_wizard "$@" ;;
       ip-mode|set-ip-mode) shift; agent_ip_mode_wizard "$@" ;;
+      public-entry|entry) shift; menu_session public_entry_menu "$@" ;;
       poll-once) shift; agent_poll_once "$@" ;;
       poll|poll-loop) shift; agent_poll_loop "$@" ;;
       install-service) shift; install_agent_service "$@" ;;
@@ -2595,6 +2719,9 @@ main() {
     migrate-state) shift; migrate_state "$@" ;;
     import-endpoint) shift; core_cmd import-endpoint --state-dir "$STATE_DIR" "$@" ;;
     export-endpoint) shift; core_cmd export-endpoint --state-dir "$STATE_DIR" "$@" ;;
+    public-entry-set) shift; public_entry_set "$@" ;;
+    public-entry-list) shift; public_entry_list "$@" ;;
+    public-entry|entry) shift; menu_session public_entry_menu "$@" ;;
     bind-transit) shift; core_cmd bind-transit --state-dir "$STATE_DIR" "$@" ;;
     list-endpoints) list_endpoints ;;
     show-endpoint) shift; show_endpoint "${1:-}" ;;
