@@ -115,6 +115,15 @@ RELAYPILOT_PROFILE=tiny \
 bash ./relaypilot.sh install-bot-service > "$ROOT/bot-service.out" 2> "$ROOT/bot-service.err"
 printf '\n\n\nn\n' | SYSTEMD_DIR="$ROOT/systemd" \
 BIN_PATH="$ROOT/bin/relaypilot" \
+STATE_DIR="$ROOT/quick-hub-cancel" \
+CONF_DIR="$ROOT/transit-conf" \
+SINGBOX_CONFIG_PATH="$ROOT/config.json" \
+RELAYPILOT_NO_ROOT=1 \
+HUB_PUBLIC_HOST="https://hub.cancel.example:9443" \
+RELAYPILOT_PROFILE=tiny \
+bash ./relaypilot.sh hub-quick-setup > "$ROOT/hub-quick-cancel.out" 2> "$ROOT/hub-quick-cancel.err"
+printf '\n\n\ny\nn\n' | SYSTEMD_DIR="$ROOT/systemd" \
+BIN_PATH="$ROOT/bin/relaypilot" \
 STATE_DIR="$ROOT/quick-hub" \
 CONF_DIR="$ROOT/transit-conf" \
 SINGBOX_CONFIG_PATH="$ROOT/config.json" \
@@ -243,6 +252,10 @@ grep -q 'endpoints/hk.json' "$ROOT/migrate-dry.out"
 grep -q 'relaypilot-bot.service' "$ROOT/bot-service.out"
 grep -q 'bot-daemon' "$ROOT/systemd/relaypilot-bot.service"
 grep -q 'MemoryMax=96M' "$ROOT/systemd/relaypilot-bot.service"
+grep -q 'Hub 配置预览' "$ROOT/hub-quick-cancel.out"
+grep -q '未写入任何 Hub 配置' "$ROOT/hub-quick-cancel.out"
+[[ ! -e "$ROOT/quick-hub-cancel/hub-tls/ca.crt" ]]
+grep -q 'Hub 配置预览' "$ROOT/hub-quick.out"
 grep -q 'Hub URL 给 agent 使用：https://hub.quick.example:9443' "$ROOT/hub-quick.out"
 grep -q '证书 SAN 包含：hub.quick.example' "$ROOT/hub-quick.out"
 grep -q 'hub-daemon' "$ROOT/systemd/relaypilot-hub.service"

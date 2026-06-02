@@ -277,6 +277,11 @@ port_from_host_input() {
   return 0
 }
 
+valid_port() {
+  local value="$1"
+  [[ "$value" =~ ^[0-9]+$ ]] && (( value >= 1 && value <= 65535 ))
+}
+
 url_host() {
   local value
   value="$(host_only "$1")"
@@ -1413,8 +1418,24 @@ hub_quick_setup() {
   cert_host="$(host_only "$public_host")"
   public_host_for_url="$(url_host "$public_host")"
   prompt port "Hub HTTPS port" "$port"
+  if ! valid_port "$port"; then
+    err "Hub HTTPS port 必须是 1-65535：$port"
+    return 1
+  fi
   prompt listen_host "Hub listen address" "$listen_host"
   [[ -z "$listen_host" ]] && listen_host="0.0.0.0"
+
+  title "Hub 配置预览"
+  printf "  Hub URL：      https://%s:%s\n" "$public_host_for_url" "$port"
+  printf "  监听地址：     %s:%s\n" "$listen_host" "$port"
+  printf "  证书 SAN：     %s\n" "$cert_host"
+  printf "  状态目录：     %s\n" "$STATE_DIR"
+  printf "  systemd 服务： %s\n" "$HUB_SERVICE_NAME"
+  echo
+  if ! confirm "确认写入/更新 Hub 配置" y; then
+    info "未写入任何 Hub 配置。"
+    return 0
+  fi
 
   if [[ -f "$STATE_DIR/hub-tls/hub.crt" && -f "$STATE_DIR/hub-tls/hub.key" && -f "$STATE_DIR/hub-tls/ca.crt" ]] && hub_tls_cert_matches_host "$STATE_DIR/hub-tls/hub.crt" "$cert_host"; then
     info "检测到已有 Hub TLS 文件，跳过证书初始化：$STATE_DIR/hub-tls"
@@ -1439,7 +1460,13 @@ hub_quick_setup() {
   info "Hub URL 给 agent 使用：https://${public_host_for_url}:${port}"
   info "下一步：在 Hub 菜单生成 agent invite；agent 端粘贴 invite 即可连接。"
   if confirm "是否现在启动 ${HUB_SERVICE_NAME}" n; then
-    service_action "$HUB_SERVICE_NAME" start
+    if service_action "$HUB_SERVICE_NAME" restart; then
+      if command -v systemctl >/dev/null 2>&1 && ! systemctl is-active --quiet "$HUB_SERVICE_NAME"; then
+        warn "${HUB_SERVICE_NAME} 未处于 active 状态，请查看：journalctl -u ${HUB_SERVICE_NAME} -n 80 --no-pager"
+      fi
+    else
+      warn "${HUB_SERVICE_NAME} 启动失败，请查看：journalctl -u ${HUB_SERVICE_NAME} -n 80 --no-pager"
+    fi
   fi
 }
 
