@@ -124,9 +124,9 @@ menu_session() {
 menu_header() {
   local heading="$1" status_line="${2:-}"
   menu_clear
-  printf "\n%s%s┌─ %s%s\n" "$CYAN" "$BOLD" "$heading" "$NC"
-  [[ -n "$status_line" ]] && printf "│  %s\n" "$status_line"
-  printf "└────────────────────────────────────────\n"
+  printf "\n%s%s%s%s\n" "$CYAN" "$BOLD" "$heading" "$NC"
+  printf "%s────────────────────────────────────────%s\n" "$CYAN" "$NC"
+  [[ -n "$status_line" ]] && printf "%s\n" "$status_line"
 }
 menu_item() {
   local key="$1" label="$2" desc="${3:-}"
@@ -1567,20 +1567,22 @@ machine_mode_label() {
 }
 
 menu_status_line() {
-  local control data agent_present=0
+  local hub agent proxy agent_present=0
   [[ -f "${STATE_DIR}/agent-enrollment.json" ]] && agent_present=1
   service_unit_installed "$AGENT_SERVICE_NAME" && agent_present=1
   if service_unit_installed "$HUB_SERVICE_NAME"; then
-    control="$(service_active_label "$HUB_SERVICE_NAME")"
+    hub="$(service_active_label "$HUB_SERVICE_NAME")"
   else
-    control="未启用"
+    hub="未启用"
   fi
   if [[ "$agent_present" == "1" ]]; then
-    data="$(service_active_label "$SERVICE_NAME")"
+    agent="$(service_active_label "$AGENT_SERVICE_NAME")"
+    proxy="$(service_active_label "$SERVICE_NAME")"
   else
-    data="未启用"
+    agent="未启用"
+    proxy="未启用"
   fi
-  printf '控制面：%s   数据面：%s' "$(menu_color_status "$control")" "$(menu_color_status "$data")"
+  printf 'Hub：%s   Agent：%s   代理：%s' "$(menu_color_status "$hub")" "$(menu_color_status "$agent")" "$(menu_color_status "$proxy")"
 }
 
 menu_title() {
