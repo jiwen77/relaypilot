@@ -122,11 +122,14 @@ menu_session() {
   return "$rc"
 }
 menu_header() {
-  local heading="$1" status_line="${2:-}"
+  local heading="$1" status_line="${2:-}" meta_line="${3:-}"
   menu_clear
-  printf "\n%s%s%s%s\n" "$CYAN" "$BOLD" "$heading" "$NC"
-  printf "%s────────────────────────────────────────%s\n" "$CYAN" "$NC"
+  printf "\n%s================================================%s\n" "$CYAN" "$NC"
+  printf "%s%s%*s%s\n" "$CYAN" "$BOLD" $(( (48 + ${#heading}) / 2 )) "$heading" "$NC"
+  printf "%s================================================%s\n" "$CYAN" "$NC"
+  [[ -n "$meta_line" ]] && printf "%s\n" "$meta_line"
   [[ -n "$status_line" ]] && printf "%s\n" "$status_line"
+  echo
 }
 menu_item() {
   local key="$1" label="$2" desc="${3:-}"
@@ -1586,10 +1589,16 @@ menu_status_line() {
 }
 
 menu_title() {
-  local section="$1" mode status
+  local section="$1" mode status meta heading
   mode="$(machine_mode_label)"
   status="$(menu_status_line)"
-  menu_header "${section} · 当前：${mode}" "$status"
+  heading="${section} · 当前：${mode}"
+  if [[ "$section" == "RelayPilot" ]]; then
+    meta="安装目录：${INSTALL_DIR}   状态目录：${STATE_DIR}"
+  else
+    meta="状态目录：${STATE_DIR}"
+  fi
+  menu_header "$heading" "$status" "$meta"
 }
 
 restart_relaypilot_services() {
