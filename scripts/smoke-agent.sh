@@ -102,6 +102,8 @@ printf '0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
 STATE_DIR="$ROOT/state" bash ./relaypilot.sh hub-init-tls --host hub.example > "$ROOT/hub-tls.out"
 printf '2\nsmoke-interactive\nhub.example\n8443\n10m\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
   bash ./relaypilot.sh hub-enroll > "$ROOT/hub-enroll.out"
+printf '1\nsmoke-url\nhttps://hub.example:9443\n\n10m\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
+  bash ./relaypilot.sh hub-enroll > "$ROOT/hub-enroll-url.out"
 RELAYPILOT_PROFILE=tiny bash ./relaypilot.sh resource-profile > "$ROOT/profile-tiny.out"
 bash ./relaypilot.sh migrate-state --from "$ROOT/state" --to "$ROOT/migrated-state" --dry-run > "$ROOT/migrate-dry.out"
 
@@ -240,6 +242,8 @@ grep -q '绑定落地 endpoint' "$ROOT/transit-menu.out"
 grep -q 'smoke-interactive' "$ROOT/hub-enroll.out"
 grep -q 'hub.example' "$ROOT/hub-enroll.out"
 grep -q -- '--enroll' "$ROOT/hub-enroll.out"
+grep -q '"hub_url": "https://hub.example:9443"' "$ROOT/hub-enroll-url.out"
+! grep -q 'https://https://' "$ROOT/hub-enroll-url.out"
 grep -q 'profile=tiny' "$ROOT/profile-tiny.out"
 grep -q 'agent=64M/15%' "$ROOT/profile-tiny.out"
 grep -q 'telegram=96M/20%' "$ROOT/profile-tiny.out"

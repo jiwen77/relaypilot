@@ -1095,7 +1095,12 @@ hub_enroll_wizard() {
   local input_port
   input_port="$(port_from_host_input "$public_host")"
   [[ -n "$input_port" ]] && port="$input_port"
+  [[ -n "$public_host" ]] && public_host="$(host_only "$public_host")"
   prompt port "Hub HTTPS 端口" "$port"
+  if ! valid_port "$port"; then
+    err "Hub HTTPS 端口必须是 1-65535：$port"
+    return 1
+  fi
   prompt ttl "Invite TTL" "$ttl"
   local args=(--agent-id "$agent_id" --role "$role" --ttl "$ttl" --port "$port")
   [[ -n "$public_host" ]] && args+=(--public-host "$public_host")
