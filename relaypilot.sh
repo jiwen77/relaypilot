@@ -46,14 +46,106 @@ HUB_ALERT_THRESHOLD_SECONDS="${HUB_ALERT_THRESHOLD_SECONDS:-86400}"
 HUB_ALERT_SNOOZE_SECONDS="${HUB_ALERT_SNOOZE_SECONDS:-86400}"
 
 if [[ -t 1 ]]; then
-  GREEN=$'\033[32m'; YELLOW=$'\033[33m'; RED=$'\033[31m'; BOLD=$'\033[1m'; DIM=$'\033[2m'; NC=$'\033[0m'
+  GREEN=$'\033[32m'; YELLOW=$'\033[33m'; RED=$'\033[31m'; CYAN=$'\033[36m'; BOLD=$'\033[1m'; DIM=$'\033[2m'; NC=$'\033[0m'
 else
-  GREEN=''; YELLOW=''; RED=''; BOLD=''; DIM=''; NC=''
+  GREEN=''; YELLOW=''; RED=''; CYAN=''; BOLD=''; DIM=''; NC=''
 fi
 info() { printf "%s==>%s %s\n" "$GREEN" "$NC" "$*"; }
 warn() { printf "%sWARN:%s %s\n" "$YELLOW" "$NC" "$*" >&2; }
 err() { printf "%sERROR:%s %s\n" "$RED" "$NC" "$*" >&2; }
 title() { printf "\n%s%s%s\n" "$BOLD" "$*" "$NC"; }
+
+MENU_SCREEN_ACTIVE=0
+menu_can_control_screen() {
+  [[ -t 0 && -t 1 ]] || return 1
+  [[ "${TERM:-}" != "" && "${TERM:-}" != "dumb" ]] || return 1
+  [[ "${RELAYPILOT_MENU_SCREEN:-1}" != "0" ]] || return 1
+}
+menu_enter_screen() {
+  [[ "$MENU_SCREEN_ACTIVE" == "1" ]] && return 0
+  menu_can_control_screen || return 0
+  if command -v tput >/dev/null 2>&1; then
+    tput smcup 2>/dev/null || true
+    tput clear 2>/dev/null || true
+  else
+    printf '\033[?1049h\033[H\033[2J'
+  fi
+  MENU_SCREEN_ACTIVE=1
+  trap 'menu_leave_screen' EXIT
+  trap 'menu_leave_screen; exit 130' INT TERM
+}
+menu_leave_screen() {
+  [[ "$MENU_SCREEN_ACTIVE" == "1" ]] || return 0
+  if command -v tput >/dev/null 2>&1; then
+    tput rmcup 2>/dev/null || true
+  else
+    printf '\033[?1049l'
+  fi
+  MENU_SCREEN_ACTIVE=0
+}
+menu_clear() {
+  [[ "$MENU_SCREEN_ACTIVE" == "1" ]] || return 0
+  if command -v tput >/dev/null 2>&1; then
+    tput clear 2>/dev/null || true
+  else
+    printf '\033[H\033[2J'
+  fi
+}
+menu_pause() {
+  [[ -t 0 && -t 1 ]] || return 0
+  local _
+  echo
+  read -r -p "按 Enter 返回菜单..." _ || true
+}
+menu_action() {
+  local rc
+  menu_clear
+  set +e
+  "$@"
+  rc=$?
+  set -e
+  (( rc == 0 )) || warn "操作未完成（退出码 ${rc}）。"
+  menu_pause
+  return 0
+}
+menu_invalid_choice() {
+  warn "无效选择"
+  menu_pause
+}
+menu_session() {
+  local fn="$1"
+  shift
+  menu_enter_screen
+  "$fn" "$@"
+  local rc=$?
+  menu_leave_screen
+  return "$rc"
+}
+menu_header() {
+  local heading="$1" status_line="${2:-}"
+  menu_clear
+  printf "\n%s%s┌─ %s%s\n" "$CYAN" "$BOLD" "$heading" "$NC"
+  [[ -n "$status_line" ]] && printf "│  %s\n" "$status_line"
+  printf "└────────────────────────────────────────\n"
+}
+menu_item() {
+  local key="$1" label="$2" desc="${3:-}"
+  if [[ -n "$desc" ]]; then
+    printf "  %s%2s%s  %s  %s%s%s\n" "$CYAN" "$key" "$NC" "$label" "$DIM" "$desc" "$NC"
+  else
+    printf "  %s%2s%s  %s\n" "$CYAN" "$key" "$NC" "$label"
+  fi
+}
+menu_back() {
+  local label="${1:-返回}"
+  echo
+  menu_item 0 "$label"
+}
+menu_prompt() {
+  local var_name="$1" range="$2" value
+  read -r -p "选择 [${range}]: " value || true
+  printf -v "$var_name" '%s' "$value"
+}
 
 usage() {
   cat <<EOF
@@ -974,7 +1066,7 @@ select_hub_agent_by_role() {
   done <<< "$output"
 
   if [[ "${#ids[@]}" -eq 0 ]]; then
-    warn "没有找到 ${label} 节点，请先生成 invite 并让 Agent 接入 Hub。"
+    warn "没有找到 ${label} 节点，请先生成 invite 并让 Agent 连接 Hub。"
     prompt "$var_name" "${label} agent id" "$default"
     return
   fi
@@ -1267,7 +1359,7 @@ hub_quick_setup() {
     --require-client-cert
   echo
   info "Hub URL 给 agent 使用：https://${public_host}:${port}"
-  info "下一步：在 Hub 菜单生成 agent invite；agent 端粘贴 invite 即可接入。"
+  info "下一步：在 Hub 菜单生成 agent invite；agent 端粘贴 invite 即可连接。"
   if confirm "是否现在启动 ${HUB_SERVICE_NAME}" n; then
     service_action "$HUB_SERVICE_NAME" start
   fi
@@ -1297,7 +1389,7 @@ agent_join_wizard() {
       ;;
   esac
   install_agent_service --enrollment-file "${STATE_DIR}/agent-enrollment.json"
-  info "Agent 已接入 Hub：${AGENT_SERVICE_NAME}"
+  info "Agent 已连接 Hub：${AGENT_SERVICE_NAME}"
 }
 
 agent_enrollment_role() {
@@ -1306,29 +1398,33 @@ agent_enrollment_role() {
   sed -n 's/.*"role"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$file" | head -n1
 }
 
+show_agent_enrollment() {
+  if [[ -f "${STATE_DIR}/agent-enrollment.json" ]]; then
+    cat "${STATE_DIR}/agent-enrollment.json"
+  else
+    warn "Agent 尚未连接 Hub。"
+  fi
+}
+
 agent_mode_menu() {
   require_root
   while true; do
-    title "Agent 模式"
-    echo "1) 配置中转节点"
-    echo "2) 配置落地节点"
-    echo "3) 粘贴 Hub invite 并安装 Agent 服务"
-    echo "4) 查看接入信息"
-    echo "0) 返回"
-    read -r -p "选择: " choice || true
+    menu_title "Agent 模式"
+    menu_item 1 "配置中转"
+    menu_item 2 "配置落地"
+    menu_item 3 "粘贴 invite"
+    menu_item 4 "接入信息"
+    menu_back
+    menu_prompt choice "0-4"
     case "${choice:-}" in
       1) transit_menu ;;
       2) landing_menu ;;
-      3) agent_join_wizard ;;
+      3) menu_action agent_join_wizard ;;
       4)
-        if [[ -f "${STATE_DIR}/agent-enrollment.json" ]]; then
-          cat "${STATE_DIR}/agent-enrollment.json"
-        else
-          warn "Agent 尚未接入 Hub。"
-        fi
+        menu_action show_agent_enrollment
         ;;
       0) return 0 ;;
-      *) warn "无效选择" ;;
+      *) menu_invalid_choice ;;
     esac
   done
 }
@@ -1356,6 +1452,144 @@ service_exists() {
   fi
 }
 
+service_unit_pattern() {
+  local unit="$1"
+  if [[ "$unit" == *.* ]]; then
+    printf '%s' "$unit"
+  else
+    printf '%s.service' "$unit"
+  fi
+}
+
+service_unit_installed() {
+  local name="$1" unit="${2:-$1}" pattern
+  if command -v systemctl >/dev/null 2>&1; then
+    pattern="$(service_unit_pattern "$unit")"
+    systemctl list-unit-files "$pattern" --no-legend 2>/dev/null | grep -q .
+  elif command -v rc-service >/dev/null 2>&1; then
+    rc-service "$name" status >/dev/null 2>&1
+  else
+    return 1
+  fi
+}
+
+service_active_label() {
+  local name="$1" unit="${2:-$1}" active installed=0
+  service_unit_installed "$name" "$unit" && installed=1
+  if command -v systemctl >/dev/null 2>&1; then
+    active="$(systemctl is-active "$unit" 2>/dev/null || true)"
+  elif command -v rc-service >/dev/null 2>&1; then
+    active="$(rc-service "$name" status 2>/dev/null | head -n1 || true)"
+  else
+    active="unknown"
+  fi
+  case "$active" in
+    active|*started*|*running*) printf '运行中' ;;
+    failed|*crashed*) printf '失败' ;;
+    activating|deactivating) printf '处理中' ;;
+    *)
+      if [[ "$installed" == "1" ]]; then
+        printf '未运行'
+      else
+        printf '未安装'
+      fi
+      ;;
+  esac
+}
+
+service_enabled_label() {
+  local name="$1" unit="${2:-$1}" enabled installed=0
+  service_unit_installed "$name" "$unit" && installed=1
+  if [[ "$installed" != "1" ]]; then
+    printf '未安装'
+    return
+  fi
+  if command -v systemctl >/dev/null 2>&1; then
+    enabled="$(systemctl is-enabled "$unit" 2>/dev/null || true)"
+  elif command -v rc-service >/dev/null 2>&1; then
+    enabled="openrc"
+  else
+    enabled="unknown"
+  fi
+  case "$enabled" in
+    enabled) printf '开机启动' ;;
+    disabled) printf '未启用' ;;
+    static) printf '静态' ;;
+    openrc) printf 'OpenRC' ;;
+    *) printf '未知' ;;
+  esac
+}
+
+menu_color_status() {
+  local value="$1"
+  case "$value" in
+    运行中|开机启动) printf '%s%s%s' "$GREEN" "$value" "$NC" ;;
+    失败|异常) printf '%s%s%s' "$RED" "$value" "$NC" ;;
+    处理中|混合部署) printf '%s%s%s' "$YELLOW" "$value" "$NC" ;;
+    未启用|未安装|未运行|未知) printf '%s%s%s' "$DIM" "$value" "$NC" ;;
+    *) printf '%s' "$value" ;;
+  esac
+}
+
+agent_role_label() {
+  case "$(agent_enrollment_role)" in
+    transit) printf '中转' ;;
+    landing) printf '落地' ;;
+    hub) printf 'Hub' ;;
+    "") printf '' ;;
+    *) printf 'Agent' ;;
+  esac
+}
+
+machine_mode_label() {
+  local hub_present=0 agent_present=0 role_label
+  service_unit_installed "$HUB_SERVICE_NAME" && hub_present=1
+  service_unit_installed "$AGENT_SERVICE_NAME" && agent_present=1
+  [[ -f "${STATE_DIR}/agent-enrollment.json" ]] && agent_present=1
+  role_label="$(agent_role_label)"
+  if [[ "$hub_present" == "1" && "$agent_present" == "1" ]]; then
+    if [[ -n "$role_label" ]]; then
+      printf 'Hub + Agent / %s' "$role_label"
+    else
+      printf 'Hub + Agent'
+    fi
+  elif [[ "$hub_present" == "1" ]]; then
+    printf 'Hub'
+  elif [[ "$agent_present" == "1" ]]; then
+    if [[ -n "$role_label" ]]; then
+      printf 'Agent / %s' "$role_label"
+    else
+      printf 'Agent'
+    fi
+  else
+    printf '未配置'
+  fi
+}
+
+menu_status_line() {
+  local control data agent_present=0
+  [[ -f "${STATE_DIR}/agent-enrollment.json" ]] && agent_present=1
+  service_unit_installed "$AGENT_SERVICE_NAME" && agent_present=1
+  if service_unit_installed "$HUB_SERVICE_NAME"; then
+    control="$(service_active_label "$HUB_SERVICE_NAME")"
+  else
+    control="未启用"
+  fi
+  if [[ "$agent_present" == "1" ]]; then
+    data="$(service_active_label "$SERVICE_NAME")"
+  else
+    data="未启用"
+  fi
+  printf '控制面：%s   数据面：%s' "$(menu_color_status "$control")" "$(menu_color_status "$data")"
+}
+
+menu_title() {
+  local section="$1" mode status
+  mode="$(machine_mode_label)"
+  status="$(menu_status_line)"
+  menu_header "${section} · 当前：${mode}" "$status"
+}
+
 restart_relaypilot_services() {
   local svc
   for svc in "$AGENT_SERVICE_NAME" "$HUB_SERVICE_NAME" "$TG_SERVICE_NAME"; do
@@ -1367,37 +1601,15 @@ restart_relaypilot_services() {
 }
 
 service_status_line() {
-  local name="$1" unit="${2:-$1}" active="unknown" enabled="unknown"
-  if command -v systemctl >/dev/null 2>&1; then
-    active="$(systemctl is-active "$unit" 2>/dev/null || true)"
-    enabled="$(systemctl is-enabled "$unit" 2>/dev/null || true)"
-    [[ -z "$active" ]] && active="unknown"
-    [[ -z "$enabled" ]] && enabled="unknown"
-  elif command -v rc-service >/dev/null 2>&1; then
-    active="$(rc-service "$name" status 2>/dev/null | head -n1 || true)"
-    enabled="openrc"
-  fi
-  case "$active" in
-    active) active="运行中" ;;
-    inactive) active="未运行" ;;
-    failed) active="失败" ;;
-    *not-found*) active="未安装" ;;
-    unknown|"") active="未知" ;;
-  esac
-  case "$enabled" in
-    enabled) enabled="开机启动" ;;
-    disabled) enabled="未启用" ;;
-    static) enabled="静态" ;;
-    openrc) enabled="OpenRC" ;;
-    *not-found*) enabled="未安装" ;;
-    unknown|"") enabled="未知" ;;
-  esac
-  printf "%-30s %-8s %s\n" "$unit" "$active" "$enabled"
+  local name="$1" unit="${2:-$1}" active enabled
+  active="$(service_active_label "$name" "$unit")"
+  enabled="$(service_enabled_label "$name" "$unit")"
+  printf "  %-28s %s / %s\n" "$unit" "$(menu_color_status "$active")" "$(menu_color_status "$enabled")"
 }
 
 service_status_overview() {
-  title "服务管理"
-  printf "%-30s %-8s %s\n" "服务" "状态" "启动"
+  menu_title "本机服务"
+  printf "  %-28s %s\n" "服务" "状态 / 启动"
   service_status_line "$AGENT_SERVICE_NAME"
   service_status_line "$HUB_SERVICE_NAME"
   service_status_line "$TG_SERVICE_NAME"
@@ -1408,30 +1620,35 @@ service_status_overview() {
 service_control_menu() {
   local name="$1" label="$2"
   while true; do
-    title "$label"
-    echo "1) 状态"
-    echo "2) 启动"
-    echo "3) 重启"
-    echo "4) 停止"
-    echo "5) 日志"
-    echo "0) 返回"
-    read -r -p "选择: " choice || true
+    menu_title "$label"
+    menu_item 1 "状态"
+    menu_item 2 "启动"
+    menu_item 3 "重启"
+    menu_item 4 "停止"
+    menu_item 5 "日志"
+    menu_back
+    menu_prompt choice "0-5"
     case "${choice:-}" in
-      1) service_action "$name" status || true ;;
-      2) service_action "$name" start ;;
-      3) service_action "$name" restart ;;
-      4) service_action "$name" stop ;;
+      1) menu_action service_action "$name" status ;;
+      2) menu_action service_action "$name" start ;;
+      3) menu_action service_action "$name" restart ;;
+      4) menu_action service_action "$name" stop ;;
       5)
-        if command -v journalctl >/dev/null 2>&1; then
-          journalctl -u "$name" -n 80 --no-pager
-        else
-          warn "未找到 journalctl。"
-        fi
+        menu_action show_service_logs "$name"
         ;;
       0) return 0 ;;
-      *) warn "无效选择" ;;
+      *) menu_invalid_choice ;;
     esac
   done
+}
+
+show_service_logs() {
+  local name="$1"
+  if command -v journalctl >/dev/null 2>&1; then
+    journalctl -u "$name" -n 80 --no-pager
+  else
+    warn "未找到 journalctl。"
+  fi
 }
 
 services_menu() {
@@ -1439,23 +1656,23 @@ services_menu() {
   while true; do
     service_status_overview
     echo
-    echo "1) Agent 服务"
-    echo "2) Hub 服务"
-    echo "3) Telegram 服务"
-    echo "4) sing-box 服务"
-    echo "5) 资源限制"
-    echo "6) 更新 RelayPilot"
-    echo "0) 返回"
-    read -r -p "选择: " choice || true
+    menu_item 1 "Agent 服务"
+    menu_item 2 "Hub 服务"
+    menu_item 3 "Telegram 服务"
+    menu_item 4 "sing-box 服务"
+    menu_item 5 "资源限制"
+    menu_item 6 "更新 RelayPilot"
+    menu_back
+    menu_prompt choice "0-6"
     case "${choice:-}" in
       1) service_control_menu "$AGENT_SERVICE_NAME" "Agent 服务" ;;
       2) service_control_menu "$HUB_SERVICE_NAME" "Hub 服务" ;;
       3) service_control_menu "$TG_SERVICE_NAME" "Telegram 服务" ;;
       4) service_control_menu "$SERVICE_NAME" "sing-box 服务" ;;
-      5) resource_profile ;;
-      6) self_update ;;
+      5) menu_action resource_profile ;;
+      6) menu_action self_update ;;
       0) return 0 ;;
-      *) warn "无效选择" ;;
+      *) menu_invalid_choice ;;
     esac
   done
 }
@@ -1463,18 +1680,18 @@ services_menu() {
 hub_tasks_menu() {
   require_root
   while true; do
-    title "任务"
-    echo "1) 任务队列"
-    echo "2) 执行结果"
-    echo "3) 恢复超时任务"
-    echo "0) 返回"
-    read -r -p "选择: " choice || true
+    menu_title "任务"
+    menu_item 1 "任务队列"
+    menu_item 2 "执行结果"
+    menu_item 3 "恢复超时任务"
+    menu_back
+    menu_prompt choice "0-3"
     case "${choice:-}" in
-      1) hub_tasks ;;
-      2) hub_results ;;
-      3) hub_recover_tasks ;;
+      1) menu_action hub_tasks ;;
+      2) menu_action hub_results ;;
+      3) menu_action hub_recover_tasks ;;
       0) return 0 ;;
-      *) warn "无效选择" ;;
+      *) menu_invalid_choice ;;
     esac
   done
 }
@@ -1482,20 +1699,20 @@ hub_tasks_menu() {
 hub_telegram_menu() {
   require_root
   while true; do
-    title "Telegram"
-    echo "1) 配置 bot"
-    echo "2) 安装服务"
-    echo "3) 注册命令"
-    echo "4) 命令列表"
-    echo "0) 返回"
-    read -r -p "选择: " choice || true
+    menu_title "Telegram"
+    menu_item 1 "配置 bot"
+    menu_item 2 "安装服务"
+    menu_item 3 "注册命令"
+    menu_item 4 "命令列表"
+    menu_back
+    menu_prompt choice "0-4"
     case "${choice:-}" in
-      1) tg_setup ;;
-      2) install_tg_hub_service ;;
-      3) tg_register_hub_commands ;;
-      4) tg_commands --hub ;;
+      1) menu_action tg_setup ;;
+      2) menu_action install_tg_hub_service ;;
+      3) menu_action tg_register_hub_commands ;;
+      4) menu_action tg_commands --hub ;;
       0) return 0 ;;
-      *) warn "无效选择" ;;
+      *) menu_invalid_choice ;;
     esac
   done
 }
@@ -1503,18 +1720,18 @@ hub_telegram_menu() {
 hub_alerts_menu() {
   require_root
   while true; do
-    title "离线告警"
-    echo "1) 扫描离线节点"
-    echo "2) 查看告警"
-    echo "3) 安装定时扫描"
-    echo "0) 返回"
-    read -r -p "选择: " choice || true
+    menu_title "离线告警"
+    menu_item 1 "扫描离线节点"
+    menu_item 2 "查看告警"
+    menu_item 3 "安装定时扫描"
+    menu_back
+    menu_prompt choice "0-3"
     case "${choice:-}" in
-      1) hub_alert_offline ;;
-      2) hub_alerts ;;
-      3) install_alert_timer ;;
+      1) menu_action hub_alert_offline ;;
+      2) menu_action hub_alerts ;;
+      3) menu_action install_alert_timer ;;
       0) return 0 ;;
-      *) warn "无效选择" ;;
+      *) menu_invalid_choice ;;
     esac
   done
 }
@@ -1522,30 +1739,30 @@ hub_alerts_menu() {
 hub_menu() {
   require_root
   while true; do
-    title "Hub 模式"
-    echo "1) 初始化 Hub 服务"
-    echo "2) 生成 Agent invite"
-    echo "3) Hub 状态"
-    echo "4) 节点列表"
-    echo "5) 串联中转/落地"
-    echo "6) Telegram"
-    echo "7) 任务"
-    echo "8) 离线告警"
-    echo "9) 移除节点"
-    echo "0) 返回"
-    read -r -p "选择: " choice || true
+    menu_title "Hub 模式"
+    menu_item 1 "初始化 Hub"
+    menu_item 2 "生成 invite"
+    menu_item 3 "Hub 状态"
+    menu_item 4 "节点列表"
+    menu_item 5 "串联节点"
+    menu_item 6 "Telegram"
+    menu_item 7 "任务"
+    menu_item 8 "离线告警"
+    menu_item 9 "移除节点"
+    menu_back
+    menu_prompt choice "0-9"
     case "${choice:-}" in
-      1) hub_quick_setup ;;
-      2) hub_enroll_wizard ;;
-      3) hub_dispatch "/status" ;;
-      4) hub_agents ;;
-      5) hub_link_wizard ;;
+      1) menu_action hub_quick_setup ;;
+      2) menu_action hub_enroll_wizard ;;
+      3) menu_action hub_dispatch "/status" ;;
+      4) menu_action hub_agents ;;
+      5) menu_action hub_link_wizard ;;
       6) hub_telegram_menu ;;
       7) hub_tasks_menu ;;
       8) hub_alerts_menu ;;
-      9) hub_remove_agent ;;
+      9) menu_action hub_remove_agent ;;
       0) return 0 ;;
-      *) warn "无效选择" ;;
+      *) menu_invalid_choice ;;
     esac
   done
 }
@@ -1553,22 +1770,22 @@ hub_menu() {
 telegram_menu() {
   require_root
   while true; do
-    title "Telegram"
-    echo "1) 配置 bot"
-    echo "2) 配置状态"
-    echo "3) 注册命令"
-    echo "4) 删除命令"
-    echo "5) 发送测试"
-    echo "0) 返回"
-    read -r -p "选择: " choice || true
+    menu_title "Telegram"
+    menu_item 1 "配置 bot"
+    menu_item 2 "配置状态"
+    menu_item 3 "注册命令"
+    menu_item 4 "删除命令"
+    menu_item 5 "发送测试"
+    menu_back
+    menu_prompt choice "0-5"
     case "${choice:-}" in
-      1) tg_setup ;;
-      2) tg_status ;;
-      3) tg_register_commands ;;
-      4) tg_delete_commands ;;
-      5) tg_send ;;
+      1) menu_action tg_setup ;;
+      2) menu_action tg_status ;;
+      3) menu_action tg_register_commands ;;
+      4) menu_action tg_delete_commands ;;
+      5) menu_action tg_send ;;
       0) return 0 ;;
-      *) warn "无效选择" ;;
+      *) menu_invalid_choice ;;
     esac
   done
 }
@@ -1576,18 +1793,18 @@ telegram_menu() {
 landing_menu() {
   require_root
   while true; do
-    title "落地节点"
-    echo "1) 安装/更新 Shadowsocks"
-    echo "2) 状态检查"
-    echo "3) Endpoints"
-    echo "0) 返回"
-    read -r -p "选择: " choice || true
+    menu_title "落地节点"
+    menu_item 1 "安装/更新 Shadowsocks"
+    menu_item 2 "状态检查"
+    menu_item 3 "Endpoints"
+    menu_back
+    menu_prompt choice "0-3"
     case "${choice:-}" in
-      1) landing_install_ss ;;
-      2) status ;;
-      3) list_endpoints ;;
+      1) menu_action landing_install_ss ;;
+      2) menu_action status ;;
+      3) menu_action list_endpoints ;;
       0) return 0 ;;
-      *) warn "无效选择" ;;
+      *) menu_invalid_choice ;;
     esac
   done
 }
@@ -1595,20 +1812,20 @@ landing_menu() {
 transit_menu() {
   require_root
   while true; do
-    title "中转节点"
-    echo "1) 初始化/更新 Reality 入口"
-    echo "2) 绑定落地 endpoint"
-    echo "3) 状态检查"
-    echo "4) Endpoints"
-    echo "0) 返回"
-    read -r -p "选择: " choice || true
+    menu_title "中转节点"
+    menu_item 1 "初始化/更新 Reality"
+    menu_item 2 "绑定落地 endpoint"
+    menu_item 3 "状态检查"
+    menu_item 4 "Endpoints"
+    menu_back
+    menu_prompt choice "0-4"
     case "${choice:-}" in
-      1) transit_init_reality ;;
-      2) transit_import_bind ;;
-      3) status ;;
-      4) list_endpoints ;;
+      1) menu_action transit_init_reality ;;
+      2) menu_action transit_import_bind ;;
+      3) menu_action status ;;
+      4) menu_action list_endpoints ;;
       0) return 0 ;;
-      *) warn "无效选择" ;;
+      *) menu_invalid_choice ;;
     esac
   done
 }
@@ -1616,18 +1833,18 @@ transit_menu() {
 main_menu() {
   require_root
   while true; do
-    title "RelayPilot"
-    echo "1) Hub 模式"
-    echo "2) Agent 模式"
-    echo "3) 本机服务"
-    echo "0) 退出"
-    read -r -p "选择: " choice || true
+    menu_title "RelayPilot"
+    menu_item 1 "Hub 模式"
+    menu_item 2 "Agent 模式"
+    menu_item 3 "本机服务"
+    menu_back "退出"
+    menu_prompt choice "0-3"
     case "${choice:-}" in
       1) hub_menu ;;
       2) agent_mode_menu ;;
       3) services_menu ;;
       0) exit 0 ;;
-      *) warn "无效选择" ;;
+      *) menu_invalid_choice ;;
     esac
   done
 }
@@ -1657,17 +1874,17 @@ main() {
       poll-once) shift; agent_poll_once "$@" ;;
       poll|poll-loop) shift; agent_poll_loop "$@" ;;
       install-service) shift; install_agent_service "$@" ;;
-      menu|"") agent_mode_menu ;;
+      menu|"") menu_session agent_mode_menu ;;
       *) err "未知 agent 命令：${1:-}"; usage; exit 1 ;;
     esac
     return
   fi
   case "${1:-}" in
-    menu|interactive) main_menu ;;
-    landing) landing_menu ;;
-    transit) transit_menu ;;
-    hub) hub_menu ;;
-    telegram|tg) telegram_menu ;;
+    menu|interactive) menu_session main_menu ;;
+    landing) menu_session landing_menu ;;
+    transit) menu_session transit_menu ;;
+    hub) menu_session hub_menu ;;
+    telegram|tg) menu_session telegram_menu ;;
     landing-install-ss) landing_install_ss ;;
     transit-init-reality|ensure-transit-reality) transit_init_reality ;;
     transit-import-bind) transit_import_bind ;;
@@ -1725,14 +1942,14 @@ main() {
     tg-dispatch|bot-dispatch) shift; tg_dispatch "${1:-}" ;;
     tg-send|bot-send) shift; tg_send "${1:-}" ;;
     resource-profile|service-profile) shift; resource_profile "$@" ;;
-    services|service|service-menu) shift; services_menu "$@" ;;
+    services|service|service-menu) shift; menu_session services_menu "$@" ;;
     install) install_self ;;
     update|self-update|upgrade) shift; self_update "$@" ;;
     uninstall) uninstall_self ;;
     doctor) doctor ;;
     status) status ;;
     -h|--help|help) usage ;;
-    "") main_menu ;;
+    "") menu_session main_menu ;;
     *) err "未知命令：$1"; usage; exit 1 ;;
   esac
 }
