@@ -19,6 +19,7 @@ GO_CORE="${RELAYPILOT_GO_BIN:-${SCRIPT_DIR}/bin/relaypilot}"
 STATE_DIR="${STATE_DIR:-/etc/relaypilot}"
 CONF_DIR="${CONF_DIR:-/etc/sing-box/conf}"
 SINGBOX_CONFIG_PATH="${SINGBOX_CONFIG_PATH:-/etc/sing-box/config.json}"
+MESH_CONFIG_DIR="${MESH_CONFIG_DIR:-/etc/wireguard}"
 SERVICE_NAME="${SERVICE_NAME:-sing-box}"
 AGENT_SERVICE_NAME="${AGENT_SERVICE_NAME:-relaypilot-agent}"
 HUB_SERVICE_NAME="${HUB_SERVICE_NAME:-relaypilot-hub}"
@@ -198,7 +199,9 @@ Usage:
   bash relaypilot.sh install
   bash relaypilot.sh update
   bash relaypilot.sh update --version v0.1.0 --restart-services
-  bash relaypilot.sh uninstall
+  bash relaypilot.sh uninstall --dry-run
+  bash relaypilot.sh uninstall --yes
+  bash relaypilot.sh uninstall --yes --full --purge-proxy-config
   bash relaypilot.sh doctor
   bash relaypilot.sh migrate-state --from /path/to/old-state --to /etc/relaypilot --dry-run
 
@@ -831,16 +834,183 @@ self_update() {
   fi
 }
 
+remove_path() {
+  local path="$1"
+  [[ -n "$path" && "$path" != "/" ]] || return 0
+  case "$path" in
+    /etc|/etc/|/opt|/opt/|/usr|/usr/|/usr/local|/usr/local/|/var|/var/|/home|/home/|/root|/root/|/tmp|/tmp/)
+      err "拒绝删除高危路径：$path"
+      return 1
+      ;;
+  esac
+  if [[ ! -e "$path" && ! -L "$path" ]]; then return 0; fi
+  if [[ "${UNINSTALL_DRY_RUN:-0}" == "1" ]]; then
+    info "DRY-RUN 删除：$path"
+  else
+    rm -rf "$path"
+    info "已删除：$path"
+  fi
+}
+
+stop_disable_systemd_unit() {
+  local unit="$1"
+  if [[ "${UNINSTALL_DRY_RUN:-0}" == "1" || "${RELAYPILOT_NO_ROOT:-}" == "1" ]]; then
+    info "DRY-RUN 停用服务：$unit"
+    return 0
+  fi
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl stop "$unit" >/dev/null 2>&1 || true
+    systemctl disable "$unit" >/dev/null 2>&1 || true
+  fi
+}
+
+remove_systemd_unit_file() {
+  local unit="$1"
+  stop_disable_systemd_unit "$unit"
+  remove_path "${SYSTEMD_DIR}/${unit}"
+}
+
+remove_openrc_service_file() {
+  local name="$1"
+  if [[ "${UNINSTALL_DRY_RUN:-0}" != "1" && "${RELAYPILOT_NO_ROOT:-}" != "1" ]] && command -v rc-service >/dev/null 2>&1; then
+    rc-service "$name" stop >/dev/null 2>&1 || true
+    rc-update del "$name" default >/dev/null 2>&1 || true
+  fi
+  remove_path "${OPENRC_DIR}/${name}"
+}
+
+remove_service_files() {
+  local name="$1"
+  remove_systemd_unit_file "${name}.service"
+  remove_openrc_service_file "$name"
+}
+
+remove_timer_files() {
+  local name="$1"
+  remove_systemd_unit_file "${name}.timer"
+  remove_systemd_unit_file "${name}.service"
+  remove_openrc_service_file "$name"
+}
+
+reload_service_manager() {
+  if [[ "${UNINSTALL_DRY_RUN:-0}" == "1" || "${RELAYPILOT_NO_ROOT:-}" == "1" ]]; then
+    return 0
+  fi
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+  fi
+}
+
+reset_hub_state() {
+  remove_service_files "$HUB_SERVICE_NAME"
+  remove_service_files "$TG_SERVICE_NAME"
+  remove_timer_files "$HUB_ALERT_TIMER_NAME"
+  remove_path "$STATE_DIR/hub-tls"
+  remove_path "$STATE_DIR/hub-agents.json"
+  remove_path "$STATE_DIR/hub-removed-agents.json"
+  remove_path "$STATE_DIR/hub-alerts.json"
+  remove_path "$STATE_DIR/hub-tasks"
+  remove_path "$STATE_DIR/hub-agent-tokens.json"
+  remove_path "$STATE_DIR/hub-auth-nonces.json"
+  remove_path "$STATE_DIR/hub-enroll-codes.json"
+  reload_service_manager
+}
+
+remove_relaypilot_proxy_fragments() {
+  local path
+  remove_service_files "$SERVICE_NAME"
+  if [[ -d "$CONF_DIR" ]]; then
+    while IFS= read -r -d '' path; do
+      remove_path "$path"
+    done < <(find "$CONF_DIR" -maxdepth 1 -type f -name '*relaypilot*.json' -print0 2>/dev/null || true)
+  fi
+  if [[ -d "$MESH_CONFIG_DIR" ]]; then
+    while IFS= read -r -d '' path; do
+      if grep -q 'RelayPilot managed WireGuard mesh' "$path" 2>/dev/null; then
+        remove_path "$path"
+      fi
+    done < <(find "$MESH_CONFIG_DIR" -maxdepth 1 -type f -name '*.conf' -print0 2>/dev/null || true)
+  fi
+  reload_service_manager
+}
+
+reset_agent_state() {
+  remove_service_files "$AGENT_SERVICE_NAME"
+  remove_path "$STATE_DIR/agent-enrollment.json"
+  remove_path "$STATE_DIR/agent-token"
+  remove_path "$STATE_DIR/hub-ca.crt"
+  remove_path "$STATE_DIR/agent.crt"
+  remove_path "$STATE_DIR/agent.key"
+  remove_path "$STATE_DIR/endpoints"
+  remove_relaypilot_proxy_fragments
+  reload_service_manager
+}
+
+uninstall_preview() {
+  local purge_state="$1" purge_proxy="$2" dry_run="$3"
+  title "卸载预览"
+  printf "  程序目录：     %s\n" "$INSTALL_DIR"
+  printf "  命令入口：     %s\n" "$BIN_PATH"
+  printf "  RelayPilot 服务：%s, %s, %s, %s\n" "$HUB_SERVICE_NAME" "$AGENT_SERVICE_NAME" "$TG_SERVICE_NAME" "$HUB_ALERT_TIMER_NAME"
+  if [[ "$purge_state" == "1" ]]; then
+    printf "  状态目录：     删除 %s\n" "$STATE_DIR"
+  else
+    printf "  状态目录：     保留 %s\n" "$STATE_DIR"
+  fi
+  if [[ "$purge_proxy" == "1" ]]; then
+    printf "  代理配置：     删除 %s 内 RelayPilot 片段；删除 WireGuard RelayPilot mesh\n" "$CONF_DIR"
+    printf "  sing-box 主配置：保留 %s\n" "$SINGBOX_CONFIG_PATH"
+  else
+    printf "  代理配置：     保留\n"
+  fi
+  if [[ "$dry_run" == "1" ]]; then
+    printf "  模式：         DRY-RUN，只预览不删除\n"
+  fi
+  return 0
+}
+
 uninstall_self() {
   require_root
-  if [[ -L "$BIN_PATH" || -f "$BIN_PATH" ]]; then rm -f "$BIN_PATH"; info "已删除：$BIN_PATH"; fi
-  if [[ -d "$INSTALL_DIR" ]]; then rm -rf "$INSTALL_DIR"; info "已删除：$INSTALL_DIR"; fi
-  if [[ "${KEEP_STATE:-1}" == "0" && -d "$STATE_DIR" ]]; then
-    rm -rf "$STATE_DIR"
-    info "已删除状态目录：$STATE_DIR"
+  local purge_state=0 purge_proxy=0 dry_run=0 force=0
+  [[ "${KEEP_STATE:-1}" == "0" ]] && purge_state=1
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --full|--purge-state|--delete-state) purge_state=1; shift ;;
+      --keep-state) purge_state=0; shift ;;
+      --purge-proxy-config|--delete-proxy-config) purge_proxy=1; shift ;;
+      --dry-run) dry_run=1; shift ;;
+      -y|--yes) force=1; shift ;;
+      *) err "未知参数：$1"; return 1 ;;
+    esac
+  done
+
+  uninstall_preview "$purge_state" "$purge_proxy" "$dry_run"
+  echo
+  if [[ "$force" != "1" ]]; then
+    if [[ ! -t 0 ]]; then
+      err "非交互卸载需要 --yes；建议先加 --dry-run 预览。"
+      return 1
+    fi
+    if ! confirm "确认执行卸载/清理" n; then
+      info "已取消，未删除任何内容。"
+      return 0
+    fi
+  fi
+
+  UNINSTALL_DRY_RUN="$dry_run"
+  remove_service_files "$HUB_SERVICE_NAME"
+  remove_service_files "$AGENT_SERVICE_NAME"
+  remove_service_files "$TG_SERVICE_NAME"
+  remove_timer_files "$HUB_ALERT_TIMER_NAME"
+  [[ "$purge_proxy" == "1" ]] && remove_relaypilot_proxy_fragments
+  remove_path "$BIN_PATH"
+  remove_path "$INSTALL_DIR"
+  if [[ "$purge_state" == "1" ]]; then
+    remove_path "$STATE_DIR"
   elif [[ -d "$STATE_DIR" ]]; then
     info "已保留状态目录：$STATE_DIR"
   fi
+  reload_service_manager
 }
 
 status() {
@@ -1970,6 +2140,79 @@ transit_menu() {
   done
 }
 
+reset_hub_menu_action() {
+  title "重置 Hub"
+  printf "  将停止并移除：%s, %s, %s\n" "$HUB_SERVICE_NAME" "$TG_SERVICE_NAME" "$HUB_ALERT_TIMER_NAME"
+  printf "  将删除 Hub 状态：%s/hub-*\n" "$STATE_DIR"
+  printf "  不删除程序目录：%s\n" "$INSTALL_DIR"
+  echo
+  if confirm "确认重置 Hub 配置" n; then
+    reset_hub_state
+  else
+    info "已取消，未删除任何内容。"
+  fi
+}
+
+reset_agent_menu_action() {
+  title "重置 Agent/代理"
+  printf "  将停止并移除：%s, %s\n" "$AGENT_SERVICE_NAME" "$SERVICE_NAME"
+  printf "  将删除 Agent 接入状态：%s/agent-*, %s/endpoints\n" "$STATE_DIR" "$STATE_DIR"
+  printf "  将删除代理片段：%s/*relaypilot*.json\n" "$CONF_DIR"
+  printf "  将删除 WireGuard mesh：%s 内 RelayPilot 标记配置\n" "$MESH_CONFIG_DIR"
+  printf "  不删除 sing-box 主配置：%s\n" "$SINGBOX_CONFIG_PATH"
+  echo
+  if confirm "确认重置 Agent/代理配置" n; then
+    reset_agent_state
+  else
+    info "已取消，未删除任何内容。"
+  fi
+}
+
+uninstall_from_menu() {
+  local mode="$1"
+  case "$mode" in
+    keep)
+      if confirm "卸载 RelayPilot 程序并保留状态" n; then
+        uninstall_self --keep-state --yes
+        info "RelayPilot 已卸载。"
+        menu_pause
+        menu_leave_screen
+        exit 0
+      fi
+      ;;
+    full)
+      if confirm "完全卸载：删除程序、状态和 RelayPilot 代理片段" n; then
+        uninstall_self --full --purge-proxy-config --yes
+        info "RelayPilot 已完全卸载。"
+        menu_pause
+        menu_leave_screen
+        exit 0
+      fi
+      ;;
+  esac
+}
+
+uninstall_reset_menu() {
+  require_root
+  while true; do
+    menu_title "卸载/重置"
+    menu_item 1 "重置 Hub"
+    menu_item 2 "重置 Agent/代理"
+    menu_item 3 "卸载程序（保留状态）"
+    menu_item 4 "完全卸载"
+    menu_back
+    menu_prompt choice "0-4"
+    case "${choice:-}" in
+      1) menu_action reset_hub_menu_action ;;
+      2) menu_action reset_agent_menu_action ;;
+      3) menu_clear; uninstall_from_menu keep ;;
+      4) menu_clear; uninstall_from_menu full ;;
+      0) return 0 ;;
+      *) menu_invalid_choice ;;
+    esac
+  done
+}
+
 main_menu() {
   require_root
   while true; do
@@ -1977,12 +2220,14 @@ main_menu() {
     menu_item 1 "Hub 模式"
     menu_item 2 "Agent 模式"
     menu_item 3 "本机服务"
+    menu_item 4 "卸载/重置"
     menu_back "退出"
-    menu_prompt choice "0-3"
+    menu_prompt choice "0-4"
     case "${choice:-}" in
       1) hub_menu ;;
       2) agent_mode_menu ;;
       3) services_menu ;;
+      4) uninstall_reset_menu ;;
       0) exit 0 ;;
       *) menu_invalid_choice ;;
     esac
@@ -2085,7 +2330,9 @@ main() {
     services|service|service-menu) shift; menu_session services_menu "$@" ;;
     install) install_self ;;
     update|self-update|upgrade) shift; self_update "$@" ;;
-    uninstall) uninstall_self ;;
+    reset-hub) reset_hub_state ;;
+    reset-agent|reset-proxy) reset_agent_state ;;
+    uninstall) shift; uninstall_self "$@" ;;
     doctor) doctor ;;
     status) status ;;
     -h|--help|help) usage ;;

@@ -218,6 +218,7 @@ grep -q 'RelayPilot v.* · 当前：未配置' "$ROOT/agent-menu.out"
 grep -q 'Hub：未启用.*Agent：未启用.*代理：未启用' "$ROOT/agent-menu.out"
 grep -q 'Hub 模式' "$ROOT/agent-menu.out"
 grep -q 'Agent 模式' "$ROOT/agent-menu.out"
+grep -q '卸载/重置' "$ROOT/agent-menu.out"
 grep -q '配置中转' "$ROOT/agent-menu.out"
 grep -q '配置落地' "$ROOT/agent-menu.out"
 grep -q '粘贴 invite' "$ROOT/agent-menu.out"
@@ -338,7 +339,7 @@ BIN_PATH="$ROOT/bin/relaypilot-self" \
 STATE_DIR="$ROOT/state" \
 KEEP_STATE=1 \
 RELAYPILOT_NO_ROOT=1 \
-bash ./relaypilot.sh uninstall > "$ROOT/uninstall.out" 2> "$ROOT/uninstall.err"
+bash ./relaypilot.sh uninstall --yes > "$ROOT/uninstall.out" 2> "$ROOT/uninstall.err"
 [[ ! -e "$ROOT/install-dir" ]]
 [[ ! -e "$ROOT/bin/relaypilot-self" ]]
 [[ -d "$ROOT/state" ]]
