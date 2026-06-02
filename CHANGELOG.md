@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.5
+
+- Refuse interactive menus without a TTY so automation probes cannot leave stuck menu processes on remote hosts.
+
 ## 0.1.4
 
 - Install managed Hub/Agent/Bot services against the Go core directly so OpenRC restarts do not leave orphaned Bash/core child processes.

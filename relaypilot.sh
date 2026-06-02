@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="${RELAYPILOT_VERSION:-0.1.4}"
+VERSION="${RELAYPILOT_VERSION:-0.1.5}"
 REPO="${REPO:-jiwen77/relaypilot}"
 RAW_REF="${RAW_REF:-main}"
 RAW_BASE="${RAW_BASE:-https://github.com/${REPO}/raw/${RAW_REF}}"
@@ -58,10 +58,34 @@ err() { printf "%sERROR:%s %s\n" "$RED" "$NC" "$*" >&2; }
 title() { printf "\n%s%s%s\n" "$BOLD" "$*" "$NC"; }
 
 MENU_SCREEN_ACTIVE=0
+MENU_PREFETCHED_INPUT=()
 menu_can_control_screen() {
   [[ -t 0 && -t 1 ]] || return 1
   [[ "${TERM:-}" != "" && "${TERM:-}" != "dumb" ]] || return 1
   [[ "${RELAYPILOT_MENU_SCREEN:-1}" != "0" ]] || return 1
+}
+menu_prefetch_non_tty_input() {
+  [[ -t 0 ]] && return 0
+  local value timeout="${RELAYPILOT_MENU_INPUT_TIMEOUT:-0.2}"
+  if IFS= read -r -t "$timeout" value; then
+    MENU_PREFETCHED_INPUT+=("$value")
+    return 0
+  fi
+  if [[ -n "${value:-}" ]]; then
+    MENU_PREFETCHED_INPUT+=("$value")
+    return 0
+  fi
+  return 1
+}
+menu_read_line() {
+  local var_name="$1" line
+  if (( ${#MENU_PREFETCHED_INPUT[@]} > 0 )); then
+    line="${MENU_PREFETCHED_INPUT[0]}"
+    MENU_PREFETCHED_INPUT=("${MENU_PREFETCHED_INPUT[@]:1}")
+  else
+    read -r line || true
+  fi
+  printf -v "$var_name" '%s' "$line"
 }
 menu_enter_screen() {
   [[ "$MENU_SCREEN_ACTIVE" == "1" ]] && return 0
@@ -117,6 +141,11 @@ menu_invalid_choice() {
 menu_session() {
   local fn="$1"
   shift
+  if ! menu_prefetch_non_tty_input; then
+    warn "interactive menu requires a TTY or piped menu input; run 'relaypilot help' or pass a subcommand for automation."
+    usage
+    return 2
+  fi
   menu_enter_screen
   "$fn" "$@"
   local rc=$?
@@ -149,7 +178,8 @@ menu_back() {
 menu_prompt() {
   local var_name="$1" range="$2" value
   echo
-  read -r -p "选择 [${range}]: " value || true
+  printf "选择 [%s]: " "$range"
+  menu_read_line value
   printf -v "$var_name" '%s' "$value"
 }
 
@@ -203,7 +233,7 @@ Usage:
   bash relaypilot.sh bot register
   bash relaypilot.sh install
   bash relaypilot.sh update
-  bash relaypilot.sh update --version v0.1.4 --restart-services
+  bash relaypilot.sh update --version v0.1.5 --restart-services
   bash relaypilot.sh leave-hub  # remove Agent service/Hub credentials, keep Reality/SS/sing-box
   bash relaypilot.sh uninstall --dry-run
   bash relaypilot.sh uninstall --yes
