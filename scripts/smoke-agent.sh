@@ -96,15 +96,17 @@ printf '3\n0\n0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
   bash ./relaypilot.sh > "$ROOT/service-menu.out"
 printf '3\n2\n0\n0\n0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
   bash ./relaypilot.sh > "$ROOT/hub-service-menu.out"
+printf '4\n0\n0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
+  bash ./relaypilot.sh > "$ROOT/uninstall-menu.out"
 printf '0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
   bash ./relaypilot.sh agent > "$ROOT/agent-direct-menu.out"
 printf '0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
   bash ./relaypilot.sh transit > "$ROOT/transit-menu.out"
 
 STATE_DIR="$ROOT/state" bash ./relaypilot.sh hub-init-tls --host hub.example > "$ROOT/hub-tls.out"
-printf '2\nsmoke-interactive\n10m\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
+printf '2\nsmoke-interactive\n10\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
   bash ./relaypilot.sh hub-enroll > "$ROOT/hub-enroll.out"
-printf '1\nsmoke-url\n10m\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" HUB_PUBLIC_HOST="https://hub.example:9443" \
+printf '1\nsmoke-url\n10\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" HUB_PUBLIC_HOST="https://hub.example:9443" \
   bash ./relaypilot.sh hub-enroll > "$ROOT/hub-enroll-url.out"
 RELAYPILOT_PROFILE=tiny bash ./relaypilot.sh resource-profile > "$ROOT/profile-tiny.out"
 bash ./relaypilot.sh migrate-state --from "$ROOT/state" --to "$ROOT/migrated-state" --dry-run > "$ROOT/migrate-dry.out"
@@ -236,7 +238,12 @@ grep -q 'RelayPilot v.* · 当前：未配置' "$ROOT/agent-menu.out"
 grep -q 'Hub：○ 未启用.*Agent：○ 未启用.*代理：○ 未启用' "$ROOT/agent-menu.out"
 grep -q 'Hub 模式' "$ROOT/agent-menu.out"
 grep -q 'Agent 模式' "$ROOT/agent-menu.out"
-grep -q '卸载/重置' "$ROOT/agent-menu.out"
+grep -q '卸载 RelayPilot' "$ROOT/agent-menu.out"
+grep -q '退出 Hub 托管（保留程序/代理）' "$ROOT/agent-menu.out"
+grep -q '重置 Agent 和代理配置' "$ROOT/agent-menu.out"
+grep -q '重置 Hub 配置' "$ROOT/hub-menu.out"
+grep -q '卸载 RelayPilot（保留状态/代理）' "$ROOT/uninstall-menu.out"
+grep -q '彻底卸载（含状态/代理）' "$ROOT/uninstall-menu.out"
 grep -q '配置中转' "$ROOT/agent-menu.out"
 grep -q '配置落地' "$ROOT/agent-menu.out"
 grep -q '粘贴 invite' "$ROOT/agent-menu.out"
@@ -265,8 +272,18 @@ grep -q '绑定落地 endpoint' "$ROOT/transit-menu.out"
 
 grep -q 'smoke-interactive' "$ROOT/hub-enroll.out"
 grep -q 'hub.example' "$ROOT/hub-enroll.out"
+grep -q '^  1) 中转节点' "$ROOT/hub-enroll.out"
+grep -q '^  2) 落地节点' "$ROOT/hub-enroll.out"
+grep -q '^  选择序号 \[默认：1\]:' "$ROOT/hub-enroll.out"
+! grep -q '^选择序号 \[默认：transit\]:' "$ROOT/hub-enroll.out"
+grep -q '邀请码有效期（分钟）' "$ROOT/hub-enroll.out"
+grep -q 'Agent 邀请码已生成' "$ROOT/hub-enroll.out"
+grep -q '有效期：10 分钟' "$ROOT/hub-enroll.out"
+grep -q '待接入' "$ROOT/hub-enroll.out"
+grep -q '安装命令' "$ROOT/hub-enroll.out"
 grep -q -- '--enroll' "$ROOT/hub-enroll.out"
-grep -q '"hub_url": "https://hub.example:9443"' "$ROOT/hub-enroll-url.out"
+! grep -q '"invite"' "$ROOT/hub-enroll.out"
+grep -q 'Hub：https://hub.example:9443' "$ROOT/hub-enroll-url.out"
 ! grep -q 'https://https://' "$ROOT/hub-enroll-url.out"
 grep -q 'profile=tiny' "$ROOT/profile-tiny.out"
 grep -q 'agent=64M/15%' "$ROOT/profile-tiny.out"
@@ -288,13 +305,13 @@ grep -q 'Hub URL 给 agent 使用：https://hub.quick.example:9443' "$ROOT/hub-q
 grep -q '证书 SAN 包含：hub.quick.example' "$ROOT/hub-quick.out"
 grep -q 'Hub URL： https://hub.quick.example:9443' "$ROOT/hub-enroll-stored-default.out"
 grep -q '默认：' "$ROOT/hub-enroll-stored-default.out"
-grep -q '"hub_url": "https://hub.quick.example:9443"' "$ROOT/hub-enroll-stored-default.out"
+grep -q 'Hub：https://hub.quick.example:9443' "$ROOT/hub-enroll-stored-default.out"
 if grep -q 'Hub 公网 IP/域名' "$ROOT/hub-enroll-stored-default.out" || grep -q 'Hub HTTPS 端口' "$ROOT/hub-enroll-stored-default.out"; then
   echo "stored Hub public URL should be reused without prompting for host/port" >&2
   exit 1
 fi
 grep -q 'Hub URL： https://hub.quick.example:9443' "$ROOT/hub-enroll-inferred-default.out"
-grep -q '"hub_url": "https://hub.quick.example:9443"' "$ROOT/hub-enroll-inferred-default.out"
+grep -q 'Hub：https://hub.quick.example:9443' "$ROOT/hub-enroll-inferred-default.out"
 if grep -q 'Hub 公网 IP/域名' "$ROOT/hub-enroll-inferred-default.out" || grep -q 'Hub HTTPS 端口' "$ROOT/hub-enroll-inferred-default.out"; then
   echo "existing Hub TLS/service should infer Hub public URL without prompting for host/port" >&2
   exit 1

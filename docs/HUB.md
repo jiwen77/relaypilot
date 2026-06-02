@@ -68,6 +68,13 @@ relaypilot hub-create-enroll-code \
   --labels region=hk,provider=example \
   --ttl 10m
 
+# Human-readable output for manual copy/paste:
+relaypilot hub-create-enroll-code \
+  --agent-id transit-hk \
+  --role transit \
+  --ttl 10m \
+  --text
+
 # Optional domain/IP override:
 relaypilot hub-init-tls --host hub.example
 relaypilot hub-create-enroll-code \
@@ -77,6 +84,11 @@ relaypilot hub-create-enroll-code \
   --labels region=hk,provider=example \
   --ttl 10m
 ```
+
+Invite creation writes the Agent to the Hub registry as `待接入` before the
+target machine connects. If the invite expires or the install fails, generate a
+new invite for the same `--agent-id`; pending role/name/labels are reused when
+omitted, and the secret remains short-lived and single-use.
 
 Paste the printed `install_command` on the agent host, or after RelayPilot is already installed use Agent mode. Enrolling the Agent joins the Hub control plane; the interactive Agent path also offers the local data-plane setup for the invite role:
 
@@ -368,6 +380,12 @@ want queued tasks cancelled automatically.
 If the removed machine is already offline or uninstalled, Hub cannot execute
 cleanup on that machine itself; run local uninstall/cleanup there. Hub still
 protects the other side from stale routes where it can.
+
+On a node, `relaypilot leave-hub` only removes the RelayPilot Agent
+service and Hub enrollment credentials. It keeps the installed data plane
+intact: Reality, Shadowsocks, sing-box config fragments, and WireGuard files
+are not deleted. Use the menu item `退出 Hub 托管（保留程序/代理）` for the same
+operation.
 
 ## 24h offline Telegram cleanup prompt
 

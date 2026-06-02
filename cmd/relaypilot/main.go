@@ -592,7 +592,7 @@ func run(args []string) error {
 		stateDir := fs.String("state-dir", defaultStateDir, "state directory")
 		hubURL := fs.String("hub-url", "", "public Hub URL used by the agent, e.g. https://hub.example:8443")
 		agentID := fs.String("agent-id", "", "agent id")
-		role := fs.String("role", "transit", "agent role")
+		role := fs.String("role", "", "agent role; defaults to existing agent role or transit")
 		name := fs.String("name", "", "display name")
 		labels := fs.String("labels", "", "comma-separated key=value labels")
 		days := fs.Int("days", defaultAgentCertDays, "certificate validity in days")
@@ -614,6 +614,7 @@ func run(args []string) error {
 		labels := fs.String("labels", "", "comma-separated key=value labels")
 		ttl := fs.Duration("ttl", time.Duration(defaultEnrollCodeTTLSeconds)*time.Second, "enrollment code lifetime")
 		days := fs.Int("days", defaultAgentCertDays, "client certificate validity in days")
+		asText := fs.Bool("text", false, "print human-readable invite")
 		_ = fs.Parse(args[1:])
 		resolvedHubURL, err := resolveHubPublicURL(hubPublicURLOptions{ExplicitURL: *hubURL, PublicHost: *publicHost, Port: *publicPort}, detectPublicIP)
 		if err != nil {
@@ -622,6 +623,10 @@ func run(args []string) error {
 		res, err := createHubEnrollInvite(*stateDir, hubEnrollCodeOptions{HubURL: resolvedHubURL, AgentID: *agentID, Role: *role, Name: *name, Labels: *labels, TTLSeconds: int64(ttl.Seconds()), Days: *days})
 		if err != nil {
 			return err
+		}
+		if *asText {
+			fmt.Println(formatHubEnrollInviteText(res))
+			return nil
 		}
 		return printJSON(res)
 	case "hub-rotate-token":
@@ -990,7 +995,7 @@ Commands:
   hub-init-tls [--state-dir DIR] --host HUB_IP_OR_DNS [--force]
   hub-issue-agent-cert [--state-dir DIR] [--output-dir DIR] AGENT_ID
   hub-provision-agent [--state-dir DIR] --hub-url https://HUB:8443 --agent-id ID --role transit|landing
-  hub-create-enroll-code [--state-dir DIR] [--hub-url https://HUB:8443 | --public-host HOST] --agent-id ID --role transit|landing [--port 8443] [--ttl 10m]
+  hub-create-enroll-code [--state-dir DIR] [--hub-url https://HUB:8443 | --public-host HOST] --agent-id ID --role transit|landing [--port 8443] [--ttl 10m] [--text]
   hub-dispatch [--state-dir DIR] --text "/status all"
   hub-dispatch [--state-dir DIR] --text "/link transit-hk landing-hk [auth_user] [endpoint_name] [--mode direct|mesh]"
   hub-dispatch [--state-dir DIR] --text "/update <hub|all|transit|landing|agent_id> <version|latest> [--restart]"
@@ -1482,6 +1487,53 @@ func saveHubAgentRegistration(stateDir string, registration obj) error {
 	return saveHubRegistry(stateDir, reg)
 }
 
+func upsertPendingHubAgent(stateDir string, registration obj, codeID string, expiresAt int64) error {
+	reg, err := loadHubRegistry(stateDir)
+	if err != nil {
+		return err
+	}
+	agentID := str(registration["id"])
+	if agentID == "" {
+		return errors.New("pending agent id is required")
+	}
+	agents := asObj(reg["agents"])
+	existing := asObj(agents[agentID])
+	if len(existing) > 0 && !isPendingAgent(existing) && int64Value(existing["last_seen"]) > 0 {
+		return nil
+	}
+	pending := obj{}
+	for k, v := range existing {
+		pending[k] = v
+	}
+	for k, v := range registration {
+		pending[k] = v
+	}
+	n := now()
+	if int64Value(pending["created_at"]) == 0 {
+		pending["created_at"] = firstPositiveInt64(int64Value(existing["created_at"]), n)
+	}
+	if int64Value(pending["registered_at"]) == 0 {
+		pending["registered_at"] = firstPositiveInt64(int64Value(existing["registered_at"]), n)
+	}
+	pending["updated_at"] = n
+	pending["enrollment_status"] = "pending"
+	pending["enroll_code_id"] = codeID
+	pending["enroll_expires_at"] = expiresAt
+	health := asObj(pending["health"])
+	health["status"] = "pending"
+	pending["health"] = health
+	delete(pending, "last_seen")
+	agents[agentID] = pending
+	reg["agents"] = agents
+	if str(reg["kind"]) == "" {
+		reg["kind"] = "relaypilot/hub-registry"
+	}
+	if int64Value(reg["version"]) == 0 {
+		reg["version"] = version
+	}
+	return saveHubRegistry(stateDir, reg)
+}
+
 func provisionHubAgentBundle(stateDir string, opts hubAgentProvisionOptions) (obj, error) {
 	if opts.HubURL == "" {
 		return nil, errors.New("--hub-url is required")
@@ -1584,6 +1636,10 @@ func createHubEnrollInvite(stateDir string, opts hubEnrollCodeOptions) (obj, err
 	if err != nil {
 		return nil, err
 	}
+	opts = hydrateHubEnrollOptionsFromExisting(stateDir, opts)
+	if opts.Role == "" {
+		opts.Role = "transit"
+	}
 	registration, err := buildHubAgentRegistration(opts.AgentID, opts.Role, opts.Name, opts.Labels)
 	if err != nil {
 		return nil, err
@@ -1628,11 +1684,14 @@ func createHubEnrollInvite(stateDir string, opts hubEnrollCodeOptions) (obj, err
 		"created_mode": "invite",
 	}
 	store["codes"] = codes
+	caPEM, err := os.ReadFile(hubTLSCACertPath(stateDir))
+	if err != nil {
+		return nil, err
+	}
 	if err := saveHubEnrollCodes(stateDir, store); err != nil {
 		return nil, err
 	}
-	caPEM, err := os.ReadFile(hubTLSCACertPath(stateDir))
-	if err != nil {
+	if err := upsertPendingHubAgent(stateDir, registration, codeID, expiresAt); err != nil {
 		return nil, err
 	}
 	inviteObj := obj{
@@ -1669,6 +1728,31 @@ func createHubEnrollInvite(stateDir string, opts hubEnrollCodeOptions) (obj, err
 			invite,
 		),
 	}, nil
+}
+
+func hydrateHubEnrollOptionsFromExisting(stateDir string, opts hubEnrollCodeOptions) hubEnrollCodeOptions {
+	agentID := strings.TrimSpace(opts.AgentID)
+	if agentID == "" {
+		return opts
+	}
+	reg, err := loadHubRegistry(stateDir)
+	if err != nil {
+		return opts
+	}
+	existing := asObj(asObj(reg["agents"])[agentID])
+	if len(existing) == 0 {
+		return opts
+	}
+	if opts.Role == "" {
+		opts.Role = str(existing["role"])
+	}
+	if opts.Name == "" {
+		opts.Name = str(existing["name"])
+	}
+	if opts.Labels == "" {
+		opts.Labels = formatLabels(asObj(existing["labels"]))
+	}
+	return opts
 }
 
 func normalizeHTTPSHubURL(raw string) (string, error) {
@@ -3929,10 +4013,17 @@ func hubDispatchCommand(stateDir, text string) (string, error) {
 	if len(matched) == 0 {
 		return "", fmt.Errorf("no agents matched selector: %s", selector)
 	}
+	matched, skippedPending := splitPendingAgents(matched)
+	if len(matched) == 0 {
+		return "", fmt.Errorf("matched agents are still pending enrollment: %s", selector)
+	}
 	batchID := fmt.Sprintf("%d-%s", now(), mustRandomHex(4))
 	var b strings.Builder
 	fmt.Fprintf(&b, "📨 已下发 /%s 给 %d 个节点\n", command, len(matched))
 	fmt.Fprintf(&b, "目标：%s\n", selector)
+	if len(skippedPending) > 0 {
+		fmt.Fprintf(&b, "已跳过：%d 个待接入节点\n", len(skippedPending))
+	}
 	fmt.Fprintf(&b, "批次：%s\n", batchID)
 	b.WriteString("Hub 会汇总结果后统一回复；agent 不会直接回复 Telegram。\n")
 	for _, agent := range matched {
@@ -4007,6 +4098,10 @@ func hubUpdateCommand(stateDir string, agents []obj, args []string, originText s
 	if len(matched) == 0 {
 		return "", fmt.Errorf("no agents matched selector: %s", selector)
 	}
+	matched, skippedPending := splitPendingAgents(matched)
+	if len(matched) == 0 {
+		return "", fmt.Errorf("matched agents are still pending enrollment: %s", selector)
+	}
 	batchID := fmt.Sprintf("%d-%s", now(), mustRandomHex(4))
 	payload := obj{"version": updateVersion, "restart_services": restart}
 	var b strings.Builder
@@ -4014,6 +4109,9 @@ func hubUpdateCommand(stateDir string, agents []obj, args []string, originText s
 	fmt.Fprintf(&b, "目标：%s\n", selector)
 	fmt.Fprintf(&b, "版本：%s\n", updateVersion)
 	fmt.Fprintf(&b, "重启服务：%s\n", yesNo(restart))
+	if len(skippedPending) > 0 {
+		fmt.Fprintf(&b, "已跳过：%d 个待接入节点\n", len(skippedPending))
+	}
 	fmt.Fprintf(&b, "批次：%s\n", batchID)
 	b.WriteString("Hub 会汇总结果后统一回复；建议先单节点 canary，再更新 all。\n")
 	for _, agent := range matched {
@@ -4776,6 +4874,17 @@ func selectAgents(agents []obj, selector string) []obj {
 	return out
 }
 
+func splitPendingAgents(agents []obj) (ready, pending []obj) {
+	for _, agent := range agents {
+		if isPendingAgent(agent) {
+			pending = append(pending, agent)
+		} else {
+			ready = append(ready, agent)
+		}
+	}
+	return ready, pending
+}
+
 func roleIcon(role string) string {
 	if role == "transit" {
 		return "🚦"
@@ -4784,6 +4893,19 @@ func roleIcon(role string) string {
 		return "🎯"
 	}
 	return "🧭"
+}
+
+func roleLabel(role string) string {
+	switch role {
+	case "transit":
+		return "中转"
+	case "landing":
+		return "落地"
+	case "hub":
+		return "Hub"
+	default:
+		return firstNonEmpty(role, "未知")
+	}
 }
 
 func formatAgentsText(agents []obj) string {
@@ -4798,23 +4920,45 @@ func formatAgentsText(agents []obj) string {
 		if labels != "" {
 			suffix = " · " + labels
 		}
-		fmt.Fprintf(&b, "%s %s %s · %s%s\n", livenessIcon(agent), roleIcon(str(agent["role"])), str(agent["id"]), str(agent["name"]), suffix)
+		fmt.Fprintf(&b, "%s %s %s · %s · %s%s\n", livenessIcon(agent), roleIcon(str(agent["role"])), str(agent["id"]), str(agent["name"]), livenessLabel(agent), suffix)
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
 
+func isPendingAgent(agent obj) bool {
+	return str(agent["enrollment_status"]) == "pending" && int64Value(agent["last_seen"]) == 0
+}
+
 func livenessIcon(agent obj) string {
-	age := now() - int64Value(firstNonNil(agent["last_seen"], agent["updated_at"]))
-	if age <= heartbeatStaleSeconds {
+	switch agentLiveness(agent) {
+	case "pending":
+		return "🕓"
+	case "online":
 		return "🟢"
-	}
-	if age <= heartbeatOfflineSeconds {
+	case "stale":
 		return "🟡"
+	default:
+		return "🔴"
 	}
-	return "🔴"
+}
+
+func livenessLabel(agent obj) string {
+	switch agentLiveness(agent) {
+	case "pending":
+		return "待接入"
+	case "online":
+		return "在线"
+	case "stale":
+		return "可能掉线"
+	default:
+		return "离线"
+	}
 }
 
 func agentLiveness(agent obj) string {
+	if isPendingAgent(agent) {
+		return "pending"
+	}
 	age := now() - int64Value(firstNonNil(agent["last_seen"], agent["updated_at"]))
 	if age <= heartbeatStaleSeconds {
 		return "online"
@@ -4825,9 +4969,46 @@ func agentLiveness(agent obj) string {
 	return "offline"
 }
 
+func formatSecondsHuman(seconds int64) string {
+	if seconds <= 0 {
+		seconds = defaultEnrollCodeTTLSeconds
+	}
+	if seconds%86400 == 0 {
+		return fmt.Sprintf("%d 天", seconds/86400)
+	}
+	if seconds%3600 == 0 {
+		return fmt.Sprintf("%d 小时", seconds/3600)
+	}
+	if seconds%60 == 0 {
+		return fmt.Sprintf("%d 分钟", seconds/60)
+	}
+	return fmt.Sprintf("%d 秒", seconds)
+}
+
+func formatUnixLocal(ts int64) string {
+	if ts <= 0 {
+		return "未知"
+	}
+	return time.Unix(ts, 0).Local().Format("2006-01-02 15:04:05 MST")
+}
+
+func formatHubEnrollInviteText(invite obj) string {
+	lines := []string{
+		"✅ Agent 邀请码已生成",
+		fmt.Sprintf("节点：%s（%s）", str(invite["agent_id"]), roleLabel(str(invite["role"]))),
+		"Hub：" + str(invite["hub_url"]),
+		fmt.Sprintf("有效期：%s，单次使用（到 %s）", formatSecondsHuman(int64Value(invite["ttl_seconds"])), formatUnixLocal(int64Value(invite["expires_at"]))),
+		"状态：已在 Hub 中创建为「待接入」",
+		"",
+		"安装命令（复制到目标 Agent 机器执行）：",
+		str(invite["install_command"]),
+	}
+	return strings.Join(lines, "\n")
+}
+
 func hubStatusText(stateDir string, agents []obj) string {
 	tasks, _ := listHubTasks(stateDir)
-	transits, landings, queued, offline, stale := 0, 0, 0, 0, 0
+	transits, landings, queued, offline, stale, pending := 0, 0, 0, 0, 0, 0
 	for _, a := range agents {
 		if str(a["role"]) == "transit" {
 			transits++
@@ -4840,6 +5021,8 @@ func hubStatusText(stateDir string, agents []obj) string {
 			offline++
 		case "stale":
 			stale++
+		case "pending":
+			pending++
 		}
 	}
 	for _, t := range tasks {
@@ -4855,10 +5038,12 @@ func hubStatusText(stateDir string, agents []obj) string {
 		statusIcon = "🔴"
 	} else if stale > 0 {
 		statusIcon = "🟡"
+	} else if pending > 0 {
+		statusIcon = "🕓"
 	}
 	return strings.Join([]string{
 		fmt.Sprintf("%s Hub 管理面正常", statusIcon),
-		fmt.Sprintf("节点：%d 个中转 / %d 个落地", transits, landings),
+		fmt.Sprintf("节点：%d 个中转 / %d 个落地 / %d 待接入", transits, landings, pending),
 		fmt.Sprintf("异常：%d 离线 / %d 可能掉线", offline, stale),
 		fmt.Sprintf("待处理任务：%d", queued),
 		"默认不广播：/status 只看 Hub；需要巡检时用 /status all。",
@@ -6018,7 +6203,7 @@ func hubPanelReply(stateDir string) telegramReply {
 	if host == "" {
 		host = "hub"
 	}
-	transits, landings, online, stale, offline, queued := 0, 0, 0, 0, 0, 0
+	transits, landings, online, stale, offline, pending, queued := 0, 0, 0, 0, 0, 0, 0
 	for _, agent := range agents {
 		switch str(agent["role"]) {
 		case "transit":
@@ -6033,6 +6218,8 @@ func hubPanelReply(stateDir string) telegramReply {
 			stale++
 		case "offline":
 			offline++
+		case "pending":
+			pending++
 		}
 	}
 	for _, task := range tasks {
@@ -6044,7 +6231,7 @@ func hubPanelReply(stateDir string) telegramReply {
 		"🛡 <b>RelayPilot 控制中枢</b>",
 		"Hub：" + htmlCode(host),
 		"当前版本：" + htmlCode(buildVersion),
-		fmt.Sprintf("节点：%d 在线 / %d 可能掉线 / %d 离线", online, stale, offline),
+		fmt.Sprintf("节点：%d 在线 / %d 待接入 / %d 可能掉线 / %d 离线", online, pending, stale, offline),
 		fmt.Sprintf("Transit：%d · Landing：%d", transits, landings),
 		fmt.Sprintf("待处理任务：%d", queued),
 		"",

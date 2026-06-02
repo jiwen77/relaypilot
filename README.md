@@ -167,12 +167,23 @@ relaypilot hub-create-enroll-code \
   --role transit \
   --ttl 10m
 
+# Add --text for a clean copy-ready install command instead of JSON.
+relaypilot hub-create-enroll-code \
+  --agent-id transit-hk \
+  --role transit \
+  --ttl 10m \
+  --text
+
 # Optional: use a domain or explicit IP instead of auto-detected public IP.
 relaypilot hub-create-enroll-code \
   --public-host hub.example \
   --agent-id transit-hk \
   --role transit \
   --ttl 10m
+
+# Creating an invite also creates/updates the Agent as "待接入" on the Hub.
+# If the install fails or the invite expires, rerun the same agent id to get a
+# fresh short-lived single-use invite; existing pending role/name/labels are reused.
 
 # On the agent host, paste the invite. The wizard detects the role and
 # offers the matching local setup before installing the poll service:
@@ -265,6 +276,9 @@ If a node is uninstalled gracefully, remove it from Hub with
 `relaypilot hub-remove-agent <agent_id> --reason uninstalled`; if it
 disappears unexpectedly, Hub will mark it stale/offline by heartbeat timeout
 until you remove it.
+If you only want a node to leave Hub management but keep the already deployed
+Reality/Shadowsocks/sing-box/WireGuard data plane, use the menu item
+`退出 Hub 托管（保留程序/代理）` or run `relaypilot leave-hub`.
 Hub removal also queues safe cleanup on remaining peers: removing a landing
 unbinds matching transit routes/users/outbounds; removing a transit tears down
 matching landing mesh interfaces. The removed machine itself can only be

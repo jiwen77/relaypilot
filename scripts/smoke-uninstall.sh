@@ -36,7 +36,7 @@ make_fixture() {
   : > "$SYSTEMD_DIR/${SERVICE_NAME}.service"
 }
 
-run_uninstall() {
+run_relaypilot() {
   RELAYPILOT_NO_ROOT=1 \
   INSTALL_DIR="$INSTALL_DIR" \
   BIN_PATH="$BIN_DIR/relaypilot" \
@@ -51,7 +51,11 @@ run_uninstall() {
   TG_SERVICE_NAME="$TG_SERVICE_NAME" \
   HUB_ALERT_TIMER_NAME="$HUB_ALERT_TIMER_NAME" \
   SERVICE_NAME="$SERVICE_NAME" \
-  bash "$ROOT/relaypilot.sh" uninstall "$@"
+  bash "$ROOT/relaypilot.sh" "$@"
+}
+
+run_uninstall() {
+  run_relaypilot uninstall "$@"
 }
 
 AGENT_SERVICE_NAME="rp-test-agent"
@@ -67,6 +71,21 @@ run_uninstall --full --purge-proxy-config --dry-run --yes >/tmp/relaypilot-unins
 [[ -e "$CONF_DIR/00-relaypilot-reality.json" ]]
 [[ -e "$SYSTEMD_DIR/${HUB_SERVICE_NAME}.service" ]]
 grep -q "DRY-RUN" /tmp/relaypilot-uninstall-dry.out
+
+make_fixture
+run_relaypilot leave-hub >/tmp/relaypilot-agent-control.out
+[[ -e "$BIN_DIR/relaypilot" ]]
+[[ -d "$INSTALL_DIR" ]]
+[[ -d "$STATE_DIR" ]]
+[[ -e "$SYSTEMD_DIR/${HUB_SERVICE_NAME}.service" ]]
+[[ ! -e "$SYSTEMD_DIR/${AGENT_SERVICE_NAME}.service" ]]
+[[ -e "$SYSTEMD_DIR/${TG_SERVICE_NAME}.service" ]]
+[[ ! -e "$STATE_DIR/agent-enrollment.json" ]]
+[[ -d "$STATE_DIR/endpoints" ]]
+[[ -e "$CONF_DIR/00-relaypilot-reality.json" ]]
+[[ -e "$CONF_DIR/90-relaypilot-outbounds.json" ]]
+[[ -e "$MESH_DIR/rp-test.conf" ]]
+grep -q "已退出 Hub 托管" /tmp/relaypilot-agent-control.out
 
 make_fixture
 run_uninstall --full --purge-proxy-config --yes >/tmp/relaypilot-uninstall-full.out

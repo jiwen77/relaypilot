@@ -175,8 +175,8 @@ Usage:
   bash relaypilot.sh hub-init-tls --host hub.example
   bash relaypilot.sh hub-quick-setup
   bash relaypilot.sh hub-enroll  # interactive invite wizard
-  bash relaypilot.sh hub-create-enroll-code --agent-id transit-hk --role transit  # defaults to current public IP
-  bash relaypilot.sh hub-create-enroll-code --public-host hub.example --agent-id transit-hk --role transit
+  bash relaypilot.sh hub-create-enroll-code --agent-id transit-hk --role transit  # JSON for automation
+  bash relaypilot.sh hub-create-enroll-code --public-host hub.example --agent-id transit-hk --role transit --text
   bash relaypilot.sh hub-provision-agent --hub-url https://hub.example:8443 --agent-id transit-hk --role transit
   bash relaypilot.sh hub-tokens
   bash relaypilot.sh hub-revoke-token transit-hk
@@ -200,6 +200,7 @@ Usage:
   bash relaypilot.sh install
   bash relaypilot.sh update
   bash relaypilot.sh update --version v0.1.0 --restart-services
+  bash relaypilot.sh leave-hub  # remove Agent service/Hub credentials, keep Reality/SS/sing-box
   bash relaypilot.sh uninstall --dry-run
   bash relaypilot.sh uninstall --yes
   bash relaypilot.sh uninstall --yes --full --purge-proxy-config
@@ -288,6 +289,22 @@ valid_port() {
   [[ "$value" =~ ^[0-9]+$ ]] && (( value >= 1 && value <= 65535 ))
 }
 
+duration_to_minutes() {
+  local value="$1"
+  value="${value//[[:space:]]/}"
+  if [[ "$value" =~ ^([0-9]+)$ ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+  elif [[ "$value" =~ ^([0-9]+)[mM]$ ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+  elif [[ "$value" =~ ^([0-9]+)[hH]$ ]]; then
+    printf '%s\n' "$(( BASH_REMATCH[1] * 60 ))"
+  elif [[ "$value" =~ ^([0-9]+)[dD]$ ]]; then
+    printf '%s\n' "$(( BASH_REMATCH[1] * 1440 ))"
+  else
+    return 1
+  fi
+}
+
 url_host() {
   local value
   value="$(host_only "$1")"
@@ -307,7 +324,7 @@ hub_tls_cert_matches_host() {
 }
 
 select_option() {
-  local var_name="$1" title_text="$2" default="${3:-}" choice idx raw value label desc
+  local var_name="$1" title_text="$2" default="${3:-}" choice idx raw value label desc default_choice=""
   shift 3
   echo
   title "$title_text"
@@ -321,19 +338,22 @@ select_option() {
   done
   for idx in "${!values[@]}"; do
     local mark=""
-    [[ "${values[$idx]}" == "$default" ]] && mark=" *"
+    if [[ "${values[$idx]}" == "$default" ]]; then
+      mark=" *"
+      default_choice="$((idx + 1))"
+    fi
     if [[ -n "${descs[$idx]}" ]]; then
-      printf "%2d) %s - %s%s\n" "$((idx + 1))" "${labels[$idx]}" "${descs[$idx]}" "$mark"
+      printf "  %d) %s - %s%s\n" "$((idx + 1))" "${labels[$idx]}" "${descs[$idx]}" "$mark"
     else
-      printf "%2d) %s%s\n" "$((idx + 1))" "${labels[$idx]}" "$mark"
+      printf "  %d) %s%s\n" "$((idx + 1))" "${labels[$idx]}" "$mark"
     fi
   done
   if [[ -n "$default" ]]; then
-    printf "选择序号 [默认：%s%s%s]: " "$BOLD$CYAN" "$default" "$NC"
+    printf "  选择序号 [默认：%s%s%s]: " "$BOLD$CYAN" "${default_choice:-$default}" "$NC"
     read -r choice || true
-    choice="${choice:-$default}"
+    choice="${choice:-${default_choice:-$default}}"
   else
-    printf "选择序号: "
+    printf "  选择序号: "
     read -r choice || true
   fi
   if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#values[@]} )); then
@@ -1059,14 +1079,19 @@ remove_relaypilot_proxy_fragments() {
 }
 
 reset_agent_state() {
+  reset_agent_control_state
+  remove_path "$STATE_DIR/endpoints"
+  remove_relaypilot_proxy_fragments
+  reload_service_manager
+}
+
+reset_agent_control_state() {
   remove_service_files "$AGENT_SERVICE_NAME"
   remove_path "$STATE_DIR/agent-enrollment.json"
   remove_path "$STATE_DIR/agent-token"
   remove_path "$STATE_DIR/hub-ca.crt"
   remove_path "$STATE_DIR/agent.crt"
   remove_path "$STATE_DIR/agent.key"
-  remove_path "$STATE_DIR/endpoints"
-  remove_relaypilot_proxy_fragments
   reload_service_manager
 }
 
@@ -1373,8 +1398,9 @@ hub_enroll_code() { core_cmd hub-create-enroll-code --state-dir "$STATE_DIR" "$@
 
 hub_enroll_wizard() {
   require_root
-  local agent_id="${AGENT_ID:-}" role="${AGENT_ROLE:-transit}" public_host="${HUB_PUBLIC_HOST:-}" ttl="${HUB_ENROLL_TTL:-10m}" port="${HUB_PORT:-8443}"
-  local default_public_host default_port public_host_locked=0
+  local agent_id="${AGENT_ID:-}" role="${AGENT_ROLE:-transit}" public_host="${HUB_PUBLIC_HOST:-}" ttl_minutes port="${HUB_PORT:-8443}"
+  local default_public_host default_port public_host_locked=0 parsed_minutes
+  ttl_minutes="$(duration_to_minutes "${HUB_ENROLL_MINUTES:-${HUB_ENROLL_TTL:-10m}}" 2>/dev/null || printf '10\n')"
   default_public_host="$(hub_public_host_default 2>/dev/null || true)"
   default_port="$(hub_public_port_default 2>/dev/null || true)"
   if [[ -z "$public_host" && -n "$default_public_host" ]]; then
@@ -1412,8 +1438,12 @@ hub_enroll_wizard() {
     err "Hub HTTPS 端口必须是 1-65535：$port"
     return 1
   fi
-  prompt ttl "Invite TTL" "$ttl"
-  local args=(--agent-id "$agent_id" --role "$role" --ttl "$ttl" --port "$port")
+  prompt ttl_minutes "邀请码有效期（分钟）" "$ttl_minutes"
+  if ! parsed_minutes="$(duration_to_minutes "$ttl_minutes" 2>/dev/null)" || (( parsed_minutes < 1 )); then
+    err "邀请码有效期请输入分钟数，例如 10、30、60。"
+    return 1
+  fi
+  local args=(--agent-id "$agent_id" --role "$role" --ttl "${parsed_minutes}m" --port "$port" --text)
   [[ -n "$public_host" ]] && args+=(--public-host "$public_host")
   info "Generating invite..."
   hub_enroll_code "${args[@]}"
@@ -1843,8 +1873,10 @@ agent_mode_menu() {
     menu_item 2 "配置落地"
     menu_item 3 "粘贴 invite"
     menu_item 4 "接入信息"
+    menu_item 5 "退出 Hub 托管（保留程序/代理）"
+    menu_item 6 "重置 Agent 和代理配置"
     menu_back
-    menu_prompt choice "0-4"
+    menu_prompt choice "0-6"
     case "${choice:-}" in
       1) transit_menu ;;
       2) landing_menu ;;
@@ -1852,6 +1884,8 @@ agent_mode_menu() {
       4)
         menu_action show_agent_enrollment
         ;;
+      5) menu_action reset_agent_control_menu_action ;;
+      6) menu_action reset_agent_menu_action ;;
       0) return 0 ;;
       *) menu_invalid_choice ;;
     esac
@@ -2213,8 +2247,9 @@ hub_menu() {
     menu_item 7 "任务"
     menu_item 8 "离线告警"
     menu_item 9 "移除节点"
+    menu_item 10 "重置 Hub 配置"
     menu_back
-    menu_prompt choice "0-9"
+    menu_prompt choice "0-10"
     case "${choice:-}" in
       1) menu_action hub_quick_setup ;;
       2) menu_action hub_enroll_wizard ;;
@@ -2225,6 +2260,7 @@ hub_menu() {
       7) hub_tasks_menu ;;
       8) hub_alerts_menu ;;
       9) menu_action hub_remove_agent ;;
+      10) menu_action reset_hub_menu_action ;;
       0) return 0 ;;
       *) menu_invalid_choice ;;
     esac
@@ -2295,7 +2331,7 @@ transit_menu() {
 }
 
 reset_hub_menu_action() {
-  title "重置 Hub"
+  title "重置 Hub 配置"
   printf "  将停止并移除：%s, %s, %s\n" "$HUB_SERVICE_NAME" "$TG_SERVICE_NAME" "$HUB_ALERT_TIMER_NAME"
   printf "  将删除 Hub 状态：%s/hub-*\n" "$STATE_DIR"
   printf "  不删除程序目录：%s\n" "$INSTALL_DIR"
@@ -2308,7 +2344,7 @@ reset_hub_menu_action() {
 }
 
 reset_agent_menu_action() {
-  title "重置 Agent/代理"
+  title "重置 Agent 和代理配置"
   printf "  将停止并移除：%s, %s\n" "$AGENT_SERVICE_NAME" "$SERVICE_NAME"
   printf "  将删除 Agent 接入状态：%s/agent-*, %s/endpoints\n" "$STATE_DIR" "$STATE_DIR"
   printf "  将删除代理片段：%s/*relaypilot*.json\n" "$CONF_DIR"
@@ -2322,11 +2358,26 @@ reset_agent_menu_action() {
   fi
 }
 
+reset_agent_control_menu_action() {
+  title "退出 Hub 托管"
+  printf "  将停止并移除：%s\n" "$AGENT_SERVICE_NAME"
+  printf "  将删除 Hub 接入凭证：%s/agent-enrollment.json, agent-token, hub-ca.crt, agent.crt, agent.key\n" "$STATE_DIR"
+  printf "  保留代理配置：Reality / Shadowsocks / sing-box / WireGuard\n"
+  printf "  保留程序目录：%s\n" "$INSTALL_DIR"
+  echo
+  if confirm "确认退出 Hub 托管并保留程序/代理配置" n; then
+    reset_agent_control_state
+    info "已退出 Hub 托管，保留程序和代理配置。"
+  else
+    info "已取消，未删除任何内容。"
+  fi
+}
+
 uninstall_from_menu() {
   local mode="$1"
   case "$mode" in
     keep)
-      if confirm "卸载 RelayPilot 程序并保留状态" n; then
+      if confirm "卸载 RelayPilot 程序并保留状态/代理配置" n; then
         uninstall_self --keep-state --yes
         info "RelayPilot 已卸载。"
         menu_pause
@@ -2335,7 +2386,7 @@ uninstall_from_menu() {
       fi
       ;;
     full)
-      if confirm "完全卸载：删除程序、状态和 RelayPilot 代理片段" n; then
+      if confirm "彻底卸载：删除程序、状态和 RelayPilot 代理片段" n; then
         uninstall_self --full --purge-proxy-config --yes
         info "RelayPilot 已完全卸载。"
         menu_pause
@@ -2346,21 +2397,17 @@ uninstall_from_menu() {
   esac
 }
 
-uninstall_reset_menu() {
+uninstall_relaypilot_menu() {
   require_root
   while true; do
-    menu_title "卸载/重置"
-    menu_item 1 "重置 Hub"
-    menu_item 2 "重置 Agent/代理"
-    menu_item 3 "卸载程序（保留状态）"
-    menu_item 4 "完全卸载"
+    menu_title "卸载 RelayPilot"
+    menu_item 1 "卸载 RelayPilot（保留状态/代理）"
+    menu_item 2 "彻底卸载（含状态/代理）"
     menu_back
-    menu_prompt choice "0-4"
+    menu_prompt choice "0-2"
     case "${choice:-}" in
-      1) menu_action reset_hub_menu_action ;;
-      2) menu_action reset_agent_menu_action ;;
-      3) menu_clear; uninstall_from_menu keep ;;
-      4) menu_clear; uninstall_from_menu full ;;
+      1) menu_clear; uninstall_from_menu keep ;;
+      2) menu_clear; uninstall_from_menu full ;;
       0) return 0 ;;
       *) menu_invalid_choice ;;
     esac
@@ -2374,14 +2421,14 @@ main_menu() {
     menu_item 1 "Hub 模式"
     menu_item 2 "Agent 模式"
     menu_item 3 "本机服务"
-    menu_item 4 "卸载/重置"
+    menu_item 4 "卸载 RelayPilot"
     menu_back "退出"
     menu_prompt choice "0-4"
     case "${choice:-}" in
       1) hub_menu ;;
       2) agent_mode_menu ;;
       3) services_menu ;;
-      4) uninstall_reset_menu ;;
+      4) uninstall_relaypilot_menu ;;
       0) exit 0 ;;
       *) menu_invalid_choice ;;
     esac
@@ -2485,6 +2532,7 @@ main() {
     install) install_self ;;
     update|self-update|upgrade) shift; self_update "$@" ;;
     reset-hub) reset_hub_state ;;
+    leave-hub|reset-agent-control|detach-agent) reset_agent_control_state; info "已退出 Hub 托管，保留程序和代理配置。" ;;
     reset-agent|reset-proxy) reset_agent_state ;;
     uninstall) shift; uninstall_self "$@" ;;
     doctor) doctor ;;

@@ -136,6 +136,13 @@ bash relaypilot.sh hub-create-enroll-code \
   --role transit \
   --ttl 10m
 
+# Use --text when a human will copy the install command.
+bash relaypilot.sh hub-create-enroll-code \
+  --agent-id transit-hk \
+  --role transit \
+  --ttl 10m \
+  --text
+
 # Optional: use a domain/IP explicitly.
 bash relaypilot.sh hub-create-enroll-code \
   --public-host hub.example \
@@ -144,6 +151,11 @@ bash relaypilot.sh hub-create-enroll-code \
   --ttl 10m
 TG_DRY_RUN=1 bash relaypilot.sh bot register --hub
 ```
+
+Invite creation also creates/updates the Agent as `待接入` on the Hub. If a
+target install fails or the invite expires, rerun the same `--agent-id` to get a
+fresh short-lived single-use invite; pending role/name/labels are reused when
+omitted.
 
 For public-Internet control-plane traffic, run the Hub with RelayPilot native
 HTTPS/mTLS instead of exposing plain HTTP:

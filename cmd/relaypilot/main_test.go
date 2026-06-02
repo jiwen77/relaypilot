@@ -858,6 +858,39 @@ func TestHubCreateEnrollCodeCLIAcceptsPublicHost(t *testing.T) {
 	}
 }
 
+func TestHubCreateEnrollCodeReusesExistingPendingAgentDefaults(t *testing.T) {
+	root := t.TempDir()
+	if _, err := initHubTLS(root, hubTLSInitOptions{Hosts: []string{"hub.example"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := createHubEnrollInvite(root, hubEnrollCodeOptions{
+		HubURL:  "https://hub.example:9443",
+		AgentID: "landing-jp",
+		Role:    "landing",
+		Name:    "Landing JP",
+		Labels:  "region=jp",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	created, err := createHubEnrollInvite(root, hubEnrollCodeOptions{
+		HubURL:  "https://hub.example:9443",
+		AgentID: "landing-jp",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if str(created["role"]) != "landing" {
+		t.Fatalf("role = %#v", created["role"])
+	}
+	agents, err := listHubAgents(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(agents) != 1 || str(agents[0]["role"]) != "landing" || str(agents[0]["name"]) != "Landing JP" || str(asObj(agents[0]["labels"])["region"]) != "jp" {
+		t.Fatalf("agents = %#v", agents)
+	}
+}
+
 func TestResolveHubPublicURLAcceptsURLAsPublicHost(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -956,6 +989,26 @@ func TestHubInviteAgentInitiatedEnrollmentAndPolls(t *testing.T) {
 	if invite == "" || strings.Contains(str(created["install_command"]), str(created["code"])) {
 		t.Fatalf("bad invite response: %#v", created)
 	}
+	pendingAgents, err := listHubAgents(hubState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pendingAgents) != 1 {
+		t.Fatalf("pending agents = %#v", pendingAgents)
+	}
+	pending := pendingAgents[0]
+	if str(pending["id"]) != "landing-jp" || str(pending["enrollment_status"]) != "pending" || int64Value(pending["last_seen"]) != 0 {
+		t.Fatalf("pending agent = %#v", pending)
+	}
+	if agentLiveness(pending) != "pending" {
+		t.Fatalf("pending liveness = %s", agentLiveness(pending))
+	}
+	if listing := formatAgentsText(pendingAgents); !strings.Contains(listing, "待接入") || !strings.Contains(listing, "🕓") {
+		t.Fatalf("pending listing = %q", listing)
+	}
+	if text := formatHubEnrollInviteText(created); !strings.Contains(text, "Agent 邀请码已生成") || !strings.Contains(text, "10 分钟") || !strings.Contains(text, "--enroll") || !strings.Contains(text, "单次使用") {
+		t.Fatalf("invite text = %q", text)
+	}
 
 	enrolled, err := agentEnrollInvite(invite, agentEnrollOptions{StateDir: agentState}, 10*time.Second)
 	if err != nil {
@@ -973,6 +1026,9 @@ func TestHubInviteAgentInitiatedEnrollmentAndPolls(t *testing.T) {
 	}
 	if len(agents) != 1 || str(agents[0]["id"]) != "landing-jp" || str(asObj(agents[0]["labels"])["region"]) != "jp" {
 		t.Fatalf("agents = %#v", agents)
+	}
+	if str(agents[0]["enrollment_status"]) != "" || agentLiveness(agents[0]) != "online" {
+		t.Fatalf("registered agent = %#v", agents[0])
 	}
 
 	cfg, err := loadAgentEnrollment(agentState)

@@ -177,7 +177,10 @@ enrollment:
    single-use code and prints an invite containing Hub URL, code id, code, agent
    metadata, expiry, and the Hub CA PEM. The Hub URL can be explicit
    (`--hub-url`), built from `--public-host`, or defaulted from detected public
-   IP plus port 8443.
+   IP plus port 8443. Invite creation also writes/updates the bound Agent in
+   the Hub registry as pending (`待接入`) without setting `last_seen`; a fresh
+   invite can be regenerated for the same Agent ID without reusing any old
+   plaintext secret.
 2. `agent-enroll --invite ...` verifies the Hub certificate with that pinned CA
    and posts to unauthenticated bootstrap endpoint `POST /api/enroll`.
 3. The Hub consumes the code, writes/updates the registry entry, stores only the
