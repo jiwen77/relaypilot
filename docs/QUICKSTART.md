@@ -184,9 +184,14 @@ relaypilot
 relaypilot agent enroll --invite 'PASTE_INVITE' --install-service
 relaypilot transit-init-reality   # transit data plane
 relaypilot landing-install-ss     # landing data plane
+relaypilot agent ip-mode --mode dynamic --public-ip-interval 600  # optional
 relaypilot agent poll-once \
   --enrollment-file /etc/relaypilot/agent-enrollment.json
 ```
+
+Keep the default `static` IP mode for stable IP/domain nodes. `dynamic` adds a
+short public-IP probe every 10 minutes by default and only records the result on
+Hub.
 
 When both the transit and landing agents are online, link them from the Hub:
 

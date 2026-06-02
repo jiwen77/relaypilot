@@ -87,6 +87,22 @@ STATE_DIR="$ROOT/state" TG_DRY_RUN=1 bash ./relaypilot.sh tg-register-commands >
 STATE_DIR="$ROOT/state" CONF_DIR="$ROOT/transit-conf" bash ./relaypilot.sh tg-dispatch "/endpoints" > "$ROOT/tg-dispatch.out"
 STATE_DIR="$ROOT/state" TG_DRY_RUN=1 bash ./relaypilot.sh tg-send "hello" > "$ROOT/tg-send.out"
 STATE_DIR="$ROOT/state" bash ./relaypilot.sh bot commands > "$ROOT/bot-commands.out"
+mkdir -p "$ROOT/ip-state"
+cat > "$ROOT/ip-state/agent-enrollment.json" <<EOF_AGENT_ENROLLMENT
+{
+  "hub_url": "https://hub.example:8443",
+  "agent_id": "transit-hk",
+  "role": "transit",
+  "token_file": "$ROOT/ip-state/agent-token",
+  "ca_cert": "$ROOT/ip-state/hub-ca.crt",
+  "client_cert": "$ROOT/ip-state/agent.crt",
+  "client_key": "$ROOT/ip-state/agent.key",
+  "created_at": 1
+}
+EOF_AGENT_ENROLLMENT
+STATE_DIR="$ROOT/ip-state" RELAYPILOT_NO_ROOT=1 bash ./relaypilot.sh agent ip-mode \
+  --mode dynamic \
+  --public-ip-interval 1800 > "$ROOT/agent-ip-mode.out"
 
 printf '2\n0\n0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
   bash ./relaypilot.sh > "$ROOT/agent-menu.out"
@@ -183,7 +199,9 @@ bash ./relaypilot.sh install-agent-service \
   --agent-id transit-hk \
   --role transit \
   --token-file "$ROOT/state/agent-token" \
-  --conf "$ROOT/transit-conf" > "$ROOT/agent-service.out" 2> "$ROOT/agent-service.err"
+  --conf "$ROOT/transit-conf" \
+  --ip-mode dynamic \
+  --public-ip-interval 600 > "$ROOT/agent-service.out" 2> "$ROOT/agent-service.err"
 
 SYSTEMD_DIR="$ROOT/systemd" \
 BIN_PATH="$ROOT/bin/relaypilot" \
@@ -241,12 +259,15 @@ grep -q 'Agent 模式' "$ROOT/agent-menu.out"
 grep -q '卸载 RelayPilot' "$ROOT/agent-menu.out"
 grep -q '退出 Hub 托管（保留程序/代理）' "$ROOT/agent-menu.out"
 grep -q '重置 Agent 和代理配置' "$ROOT/agent-menu.out"
+grep -q 'IP 模式' "$ROOT/agent-menu.out"
 grep -q '重置 Hub 配置' "$ROOT/hub-menu.out"
 grep -q '卸载 RelayPilot（保留状态/代理）' "$ROOT/uninstall-menu.out"
 grep -q '彻底卸载（含状态/代理）' "$ROOT/uninstall-menu.out"
 grep -q '配置中转' "$ROOT/agent-menu.out"
 grep -q '配置落地' "$ROOT/agent-menu.out"
 grep -q '粘贴 invite' "$ROOT/agent-menu.out"
+grep -q '"ip_mode": "dynamic"' "$ROOT/ip-state/agent-enrollment.json"
+grep -q '"public_ip_interval_seconds": 1800' "$ROOT/ip-state/agent-enrollment.json"
 grep -q 'Hub 模式' "$ROOT/hub-menu.out"
 grep -q '初始化 Hub' "$ROOT/hub-menu.out"
 grep -q '生成 invite' "$ROOT/hub-menu.out"
@@ -342,6 +363,8 @@ grep -q 'smoke-uninstall' "$ROOT/hub-removed.out"
 grep -q 'MemoryMax=96M' "$ROOT/systemd/relay-smoke-agent.service"
 grep -q 'CPUQuota=25%' "$ROOT/systemd/relay-smoke-agent.service"
 grep -q -- '--topology-interval 300' "$ROOT/systemd/relay-smoke-agent.service"
+grep -q -- '--ip-mode dynamic' "$ROOT/systemd/relay-smoke-agent.service"
+grep -q -- '--public-ip-interval 600' "$ROOT/systemd/relay-smoke-agent.service"
 grep -q 'RestartSec=30s' "$ROOT/systemd/relay-smoke-hub.service"
 grep -q 'MemoryMax=128M' "$ROOT/systemd/relay-smoke-hub.service"
 grep -q 'relay-smoke-hub-no-singbox.service' "$ROOT/hub-service-no-singbox.out"

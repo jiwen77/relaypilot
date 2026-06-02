@@ -200,6 +200,11 @@ Runtime pollers then use `--enrollment-file` instead of passing individual token
 and certificate paths. The manual `hub-provision-agent` bundle flow remains
 available for environments that cannot expose `/api/enroll`.
 
+`agent-enrollment.json` may also store local Agent network-reporting settings:
+`ip_mode` (`static` or `dynamic`) and `public_ip_interval_seconds`. Static mode
+does not perform public-IP probes. Dynamic mode adds a throttled public-IP probe
+to heartbeat metadata; the default interval is 600 seconds.
+
 
 ### Bootstrap endpoint
 
@@ -242,7 +247,9 @@ GET  /healthz
 ```
 
 `register` accepts an agent registration document and refreshes `last_seen`.
-`heartbeat` accepts optional `topology` and `health` objects. Fetching tasks
+`heartbeat` accepts optional `topology`, `health`, and `network` objects. Hub
+stores `network.ip_mode`, optional `network.public_ip`, and the source
+`network.observed_ip` derived from the heartbeat connection. Fetching tasks
 leases queued tasks by marking them `running`; posting a result marks each task
 `done` or `failed` and stores the command output/error under `result`.
 

@@ -109,6 +109,20 @@ relaypilot landing-install-ss     # landing host, if not done by menu
 relaypilot agent poll-once --enrollment-file /etc/relaypilot/agent-enrollment.json
 ```
 
+Agent IP mode is chosen on the Agent machine. Use `static` when the node has a
+stable IP or domain; it performs no extra public-IP probe. Use `dynamic` when
+the provider may change the public IP; the Agent then reports a low-frequency
+public-IP probe result in heartbeat data:
+
+```bash
+relaypilot agent ip-mode --mode static
+relaypilot agent ip-mode --mode dynamic --public-ip-interval 600
+```
+
+The Hub also records the source IP it observes from each heartbeat. These fields
+are for visibility and future automation only; changing static/dynamic mode does
+not rewrite existing Reality, Shadowsocks, or WireGuard configuration.
+
 ### Link transit to landing
 
 After both agents are enrolled and polling, the Hub can link them without manual

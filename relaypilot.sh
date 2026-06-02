@@ -184,6 +184,7 @@ Usage:
   bash relaypilot.sh agent enroll --invite 'PASTE_INVITE' --install-service
   bash relaypilot.sh agent enroll --bundle 'PASTE_BUNDLE'
   bash relaypilot.sh agent join
+  bash relaypilot.sh agent ip-mode
   bash relaypilot.sh agent poll-once --enrollment-file /etc/relaypilot/agent-enrollment.json
   bash relaypilot.sh agent install-service --enrollment-file /etc/relaypilot/agent-enrollment.json
   bash relaypilot.sh install-hub-service --host 0.0.0.0 --port 8443 --tls-cert /etc/relaypilot/hub-tls/hub.crt --tls-key /etc/relaypilot/hub-tls/hub.key --client-ca /etc/relaypilot/hub-tls/ca.crt --require-client-cert
@@ -406,6 +407,13 @@ select_agent_role() {
     "hub|Hub|控制面/管理端"
 }
 
+select_ip_mode() {
+  local var_name="$1" default="${2:-static}"
+  select_option "$var_name" "节点 IP 模式" "$default" \
+    "static|静态 IP/域名|不额外检测公网 IP" \
+    "dynamic|动态 IP|低频上报公网 IP"
+}
+
 require_root() {
   if [[ "${RELAYPILOT_NO_ROOT:-}" == "1" ]]; then return 0; fi
   if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
@@ -427,7 +435,7 @@ singbox_bin() {
 
 go_core_supports() {
   case "$1" in
-    generate-ss-password|migrate-state|tg-config|tg-status|tg-commands|tg-register-commands|tg-get-commands|tg-delete-commands|tg-dispatch|tg-send|render-landing-ss|ensure-transit-reality|validate-endpoint|render-outbound|import-endpoint|export-endpoint|bind-transit|list-endpoints|inspect-conf|hub-agent-export|hub-import-agent|hub-agents|hub-remove-agent|hub-removed-agents|hub-alert-offline|hub-alerts|hub-alert-callback|hub-recover-tasks|hub-issue-token|hub-init-tls|hub-issue-agent-cert|hub-provision-agent|hub-create-enroll-code|hub-enroll-code|agent-enroll|hub-rotate-token|hub-revoke-token|hub-tokens|hub-dispatch|hub-tasks|hub-results|hub-daemon|bot-daemon|agent-poll-once|agent-poll-loop) return 0 ;;
+    generate-ss-password|migrate-state|tg-config|tg-status|tg-commands|tg-register-commands|tg-get-commands|tg-delete-commands|tg-dispatch|tg-send|render-landing-ss|ensure-transit-reality|validate-endpoint|render-outbound|import-endpoint|export-endpoint|bind-transit|list-endpoints|inspect-conf|hub-agent-export|hub-import-agent|hub-agents|hub-remove-agent|hub-removed-agents|hub-alert-offline|hub-alerts|hub-alert-callback|hub-recover-tasks|hub-issue-token|hub-init-tls|hub-issue-agent-cert|hub-provision-agent|hub-create-enroll-code|hub-enroll-code|agent-enroll|agent-set-ip-mode|hub-rotate-token|hub-revoke-token|hub-tokens|hub-dispatch|hub-tasks|hub-results|hub-daemon|bot-daemon|agent-poll-once|agent-poll-loop) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -1544,7 +1552,7 @@ agent_poll_once() {
     core_cmd agent-poll-once --state-dir "$STATE_DIR" "$@"
     return
   fi
-  local hub_url="${HUB_URL:-}" agent_id="${AGENT_ID:-}" token_file="${AGENT_TOKEN_FILE:-}" role="${AGENT_ROLE:-}" name="${AGENT_NAME:-}" labels="${AGENT_LABELS:-}" conf="${AGENT_CONF:-$CONF_DIR}" ca_cert="${AGENT_CA_CERT:-}" client_cert="${AGENT_CLIENT_CERT:-}" client_key="${AGENT_CLIENT_KEY:-}" tls_server_name="${AGENT_TLS_SERVER_NAME:-}"
+  local hub_url="${HUB_URL:-}" agent_id="${AGENT_ID:-}" token_file="${AGENT_TOKEN_FILE:-}" role="${AGENT_ROLE:-}" name="${AGENT_NAME:-}" labels="${AGENT_LABELS:-}" conf="${AGENT_CONF:-$CONF_DIR}" ca_cert="${AGENT_CA_CERT:-}" client_cert="${AGENT_CLIENT_CERT:-}" client_key="${AGENT_CLIENT_KEY:-}" tls_server_name="${AGENT_TLS_SERVER_NAME:-}" ip_mode="${AGENT_IP_MODE:-}" public_ip_interval="${AGENT_PUBLIC_IP_INTERVAL:-}"
   [[ -z "$hub_url" ]] && prompt hub_url "Hub API URL" "http://127.0.0.1:8080"
   [[ -z "$agent_id" ]] && prompt agent_id "agent id" "$(hostname 2>/dev/null || echo agent)"
   [[ -z "$role" ]] && select_agent_role role "transit"
@@ -1555,6 +1563,8 @@ agent_poll_once() {
   [[ -n "$client_cert" ]] && args+=(--client-cert "$client_cert")
   [[ -n "$client_key" ]] && args+=(--client-key "$client_key")
   [[ -n "$tls_server_name" ]] && args+=(--tls-server-name "$tls_server_name")
+  [[ -n "$ip_mode" ]] && args+=(--ip-mode "$ip_mode")
+  [[ -n "$public_ip_interval" ]] && args+=(--public-ip-interval "$public_ip_interval")
   if [[ -n "$token_file" ]]; then
     args+=(--token-file "$token_file")
   elif [[ -z "${AGENT_TOKEN:-}" ]]; then
@@ -1569,7 +1579,7 @@ agent_poll_loop() {
     core_cmd agent-poll-loop --state-dir "$STATE_DIR" "$@"
     return
   fi
-  local hub_url="${HUB_URL:-}" agent_id="${AGENT_ID:-}" token_file="${AGENT_TOKEN_FILE:-}" role="${AGENT_ROLE:-}" name="${AGENT_NAME:-}" labels="${AGENT_LABELS:-}" conf="${AGENT_CONF:-$CONF_DIR}" interval="${AGENT_POLL_INTERVAL:-30}" topology_interval="${AGENT_TOPOLOGY_INTERVAL:-300}" ca_cert="${AGENT_CA_CERT:-}" client_cert="${AGENT_CLIENT_CERT:-}" client_key="${AGENT_CLIENT_KEY:-}" tls_server_name="${AGENT_TLS_SERVER_NAME:-}"
+  local hub_url="${HUB_URL:-}" agent_id="${AGENT_ID:-}" token_file="${AGENT_TOKEN_FILE:-}" role="${AGENT_ROLE:-}" name="${AGENT_NAME:-}" labels="${AGENT_LABELS:-}" conf="${AGENT_CONF:-$CONF_DIR}" interval="${AGENT_POLL_INTERVAL:-30}" topology_interval="${AGENT_TOPOLOGY_INTERVAL:-300}" ca_cert="${AGENT_CA_CERT:-}" client_cert="${AGENT_CLIENT_CERT:-}" client_key="${AGENT_CLIENT_KEY:-}" tls_server_name="${AGENT_TLS_SERVER_NAME:-}" ip_mode="${AGENT_IP_MODE:-}" public_ip_interval="${AGENT_PUBLIC_IP_INTERVAL:-}"
   [[ -z "$hub_url" ]] && prompt hub_url "Hub API URL" "http://127.0.0.1:8080"
   [[ -z "$agent_id" ]] && prompt agent_id "agent id" "$(hostname 2>/dev/null || echo agent)"
   [[ -z "$role" ]] && select_agent_role role "transit"
@@ -1580,6 +1590,8 @@ agent_poll_loop() {
   [[ -n "$client_cert" ]] && args+=(--client-cert "$client_cert")
   [[ -n "$client_key" ]] && args+=(--client-key "$client_key")
   [[ -n "$tls_server_name" ]] && args+=(--tls-server-name "$tls_server_name")
+  [[ -n "$ip_mode" ]] && args+=(--ip-mode "$ip_mode")
+  [[ -n "$public_ip_interval" ]] && args+=(--public-ip-interval "$public_ip_interval")
   if [[ -n "$token_file" ]]; then
     args+=(--token-file "$token_file")
   elif [[ -z "${AGENT_TOKEN:-}" ]]; then
@@ -1590,7 +1602,7 @@ agent_poll_loop() {
 }
 
 install_agent_service() {
-  local hub_url="${HUB_URL:-}" agent_id="${AGENT_ID:-}" token_file="${AGENT_TOKEN_FILE:-}" role="${AGENT_ROLE:-}" conf="${AGENT_CONF:-$CONF_DIR}" interval="${AGENT_POLL_INTERVAL:-30}" topology_interval="${AGENT_TOPOLOGY_INTERVAL:-300}" ca_cert="${AGENT_CA_CERT:-}" client_cert="${AGENT_CLIENT_CERT:-}" client_key="${AGENT_CLIENT_KEY:-}" tls_server_name="${AGENT_TLS_SERVER_NAME:-}" enrollment_file="${AGENT_ENROLLMENT_FILE:-}"
+  local hub_url="${HUB_URL:-}" agent_id="${AGENT_ID:-}" token_file="${AGENT_TOKEN_FILE:-}" role="${AGENT_ROLE:-}" conf="${AGENT_CONF:-$CONF_DIR}" interval="${AGENT_POLL_INTERVAL:-30}" topology_interval="${AGENT_TOPOLOGY_INTERVAL:-300}" ca_cert="${AGENT_CA_CERT:-}" client_cert="${AGENT_CLIENT_CERT:-}" client_key="${AGENT_CLIENT_KEY:-}" tls_server_name="${AGENT_TLS_SERVER_NAME:-}" enrollment_file="${AGENT_ENROLLMENT_FILE:-}" ip_mode="${AGENT_IP_MODE:-}" public_ip_interval="${AGENT_PUBLIC_IP_INTERVAL:-}"
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --enrollment-file) enrollment_file="$2"; shift 2 ;;
@@ -1605,6 +1617,8 @@ install_agent_service() {
       --tls-server-name) tls_server_name="$2"; shift 2 ;;
       --interval) interval="$2"; shift 2 ;;
       --topology-interval) topology_interval="$2"; shift 2 ;;
+      --ip-mode) ip_mode="$2"; shift 2 ;;
+      --public-ip-interval) public_ip_interval="$2"; shift 2 ;;
       *) err "未知参数：$1"; return 1 ;;
     esac
   done
@@ -1632,6 +1646,8 @@ install_agent_service() {
     [[ -n "$client_key" ]] && exec_cmd+=" --client-key ${client_key}"
     [[ -n "$tls_server_name" ]] && exec_cmd+=" --tls-server-name ${tls_server_name}"
   fi
+  [[ -n "$ip_mode" ]] && exec_cmd+=" --ip-mode ${ip_mode}"
+  [[ -n "$public_ip_interval" ]] && exec_cmd+=" --public-ip-interval ${public_ip_interval}"
   install_managed_service "$AGENT_SERVICE_NAME" "RelayPilot agent poll loop" "$exec_cmd" "$AGENT_SERVICE_MEMORY_MAX" "$AGENT_SERVICE_CPU_QUOTA"
 }
 
@@ -1826,11 +1842,22 @@ hub_quick_setup() {
 
 agent_join_wizard() {
   require_root
-  local invite role
+  local invite role ip_mode ip_check_minutes ip_check_seconds
   title "Agent 模式"
   prompt invite "invite" "${AGENT_INVITE:-}"
   [[ -z "$invite" ]] && { warn "invite 为空。"; return 0; }
-  agent_enroll --invite "$invite"
+  select_ip_mode ip_mode "${AGENT_IP_MODE:-static}"
+  ip_check_seconds="${AGENT_PUBLIC_IP_INTERVAL:-600}"
+  if [[ "$ip_mode" == "dynamic" ]]; then
+    ip_check_minutes="$(duration_to_minutes "${AGENT_IP_CHECK_MINUTES:-$(( ip_check_seconds / 60 ))}" 2>/dev/null || printf '10\n')"
+    prompt ip_check_minutes "公网 IP 检测间隔（分钟）" "$ip_check_minutes"
+    if ! ip_check_minutes="$(duration_to_minutes "$ip_check_minutes" 2>/dev/null)" || (( ip_check_minutes < 1 )); then
+      err "公网 IP 检测间隔请输入分钟数，例如 10、30、60。"
+      return 1
+    fi
+    ip_check_seconds="$(( ip_check_minutes * 60 ))"
+  fi
+  agent_enroll --invite "$invite" --ip-mode "$ip_mode" --public-ip-interval "$ip_check_seconds"
   role="$(agent_enrollment_role)"
   case "$role" in
     transit)
@@ -1857,6 +1884,56 @@ agent_enrollment_role() {
   sed -n 's/.*"role"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$file" | head -n1
 }
 
+agent_enrollment_value() {
+  local key="$1" file="${STATE_DIR}/agent-enrollment.json"
+  [[ -f "$file" ]] || return 0
+  sed -n 's/.*"'"$key"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$file" | head -n1
+}
+
+agent_enrollment_number() {
+  local key="$1" file="${STATE_DIR}/agent-enrollment.json"
+  [[ -f "$file" ]] || return 0
+  sed -n 's/.*"'"$key"'"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$file" | head -n1
+}
+
+agent_ip_mode_wizard() {
+  require_root
+  if [[ $# -gt 0 ]]; then
+    core_cmd agent-set-ip-mode --state-dir "$STATE_DIR" "$@"
+    if service_unit_installed "$AGENT_SERVICE_NAME"; then
+      service_action "$AGENT_SERVICE_NAME" restart || warn "Agent 服务重启失败，请查看日志。"
+    fi
+    return
+  fi
+  if [[ ! -f "${STATE_DIR}/agent-enrollment.json" ]]; then
+    warn "Agent 尚未连接 Hub。请先粘贴 invite。"
+    return 0
+  fi
+  local current_mode ip_mode current_seconds ip_check_minutes ip_check_seconds
+  current_mode="$(agent_enrollment_value ip_mode)"
+  [[ -z "$current_mode" ]] && current_mode="static"
+  current_seconds="$(agent_enrollment_number public_ip_interval_seconds)"
+  [[ -z "$current_seconds" || "$current_seconds" -le 0 ]] && current_seconds=600
+  title "Agent IP 模式"
+  select_ip_mode ip_mode "$current_mode"
+  ip_check_seconds="$current_seconds"
+  if [[ "$ip_mode" == "dynamic" ]]; then
+    ip_check_minutes="$(duration_to_minutes "$(( current_seconds / 60 ))" 2>/dev/null || printf '10\n')"
+    [[ "$ip_check_minutes" -lt 1 ]] && ip_check_minutes=10
+    prompt ip_check_minutes "公网 IP 检测间隔（分钟）" "$ip_check_minutes"
+    if ! ip_check_minutes="$(duration_to_minutes "$ip_check_minutes" 2>/dev/null)" || (( ip_check_minutes < 1 )); then
+      err "公网 IP 检测间隔请输入分钟数，例如 10、30、60。"
+      return 1
+    fi
+    ip_check_seconds="$(( ip_check_minutes * 60 ))"
+  fi
+  core_cmd agent-set-ip-mode --state-dir "$STATE_DIR" --mode "$ip_mode" --public-ip-interval "$ip_check_seconds"
+  if service_unit_installed "$AGENT_SERVICE_NAME"; then
+    service_action "$AGENT_SERVICE_NAME" restart || warn "Agent 服务重启失败，请查看日志。"
+  fi
+  info "已更新 Agent IP 模式：$ip_mode"
+}
+
 show_agent_enrollment() {
   if [[ -f "${STATE_DIR}/agent-enrollment.json" ]]; then
     cat "${STATE_DIR}/agent-enrollment.json"
@@ -1873,10 +1950,11 @@ agent_mode_menu() {
     menu_item 2 "配置落地"
     menu_item 3 "粘贴 invite"
     menu_item 4 "接入信息"
-    menu_item 5 "退出 Hub 托管（保留程序/代理）"
-    menu_item 6 "重置 Agent 和代理配置"
+    menu_item 5 "IP 模式"
+    menu_item 6 "退出 Hub 托管（保留程序/代理）"
+    menu_item 7 "重置 Agent 和代理配置"
     menu_back
-    menu_prompt choice "0-6"
+    menu_prompt choice "0-7"
     case "${choice:-}" in
       1) transit_menu ;;
       2) landing_menu ;;
@@ -1884,8 +1962,9 @@ agent_mode_menu() {
       4)
         menu_action show_agent_enrollment
         ;;
-      5) menu_action reset_agent_control_menu_action ;;
-      6) menu_action reset_agent_menu_action ;;
+      5) menu_action agent_ip_mode_wizard ;;
+      6) menu_action reset_agent_control_menu_action ;;
+      7) menu_action reset_agent_menu_action ;;
       0) return 0 ;;
       *) menu_invalid_choice ;;
     esac
@@ -2457,6 +2536,7 @@ main() {
     case "${1:-}" in
       enroll) shift; agent_enroll "$@" ;;
       join) shift; agent_join_wizard "$@" ;;
+      ip-mode|set-ip-mode) shift; agent_ip_mode_wizard "$@" ;;
       poll-once) shift; agent_poll_once "$@" ;;
       poll|poll-loop) shift; agent_poll_loop "$@" ;;
       install-service) shift; install_agent_service "$@" ;;
@@ -2484,6 +2564,7 @@ main() {
     hub-create-enroll-code|hub-enroll-code) shift; hub_enroll_code "$@" ;;
     hub-enroll|hub-invite) shift; hub_enroll_wizard "$@" ;;
     agent-enroll) shift; agent_enroll "$@" ;;
+    agent-ip-mode|agent-set-ip-mode) shift; agent_ip_mode_wizard "$@" ;;
     hub-rotate-token) shift; hub_rotate_token "${1:-}" "${@:2}" ;;
     hub-revoke-token) shift; hub_revoke_token "${1:-}" "${@:2}" ;;
     hub-tokens) shift; hub_tokens "$@" ;;

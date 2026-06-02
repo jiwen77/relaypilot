@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -1010,7 +1011,7 @@ func TestHubInviteAgentInitiatedEnrollmentAndPolls(t *testing.T) {
 		t.Fatalf("invite text = %q", text)
 	}
 
-	enrolled, err := agentEnrollInvite(invite, agentEnrollOptions{StateDir: agentState}, 10*time.Second)
+	enrolled, err := agentEnrollInvite(invite, agentEnrollOptions{StateDir: agentState, IPMode: "dynamic", PublicIPIntervalSeconds: 600}, 10*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1034,6 +1035,9 @@ func TestHubInviteAgentInitiatedEnrollmentAndPolls(t *testing.T) {
 	cfg, err := loadAgentEnrollment(agentState)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if cfg.IPMode != "dynamic" || cfg.PublicIPIntervalSeconds != 600 {
+		t.Fatalf("agent enrollment ip mode = %#v", cfg)
 	}
 	tlsConfig, err := loadAgentTLSConfig(cfg.CACertPath, cfg.ClientCertPath, cfg.ClientKeyPath, "")
 	if err != nil {
@@ -1648,6 +1652,117 @@ func TestResourceGuardsLimitJSONHTTPAndTaskBatch(t *testing.T) {
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusRequestEntityTooLarge {
 		t.Fatalf("large body status = %d", resp.StatusCode)
+	}
+}
+
+func TestAgentPollerReportsDynamicIPMode(t *testing.T) {
+	state := t.TempDir()
+	registration, err := buildHubAgentRegistration("agent-a", "landing", "Agent A", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := saveHubAgentRegistration(state, registration); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := issueHubAgentToken(state, "agent-a", "secret"); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(&hubServer{stateDir: state, quiet: true})
+	defer srv.Close()
+
+	probes := 0
+	poller := newAgentPoller(srv.URL, "agent-a", "secret", "landing", state, "", 0, time.Second, 0)
+	poller.ipMode = "dynamic"
+	poller.publicIPInterval = time.Hour
+	poller.publicIPProbe = func(time.Duration) (string, error) {
+		probes++
+		return "198.51.100.23", nil
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := poller.pollOnce(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if probes != 1 {
+		t.Fatalf("public IP probes = %d", probes)
+	}
+	agents, err := listHubAgents(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	network := asObj(agents[0]["network"])
+	if str(network["ip_mode"]) != "dynamic" || str(network["public_ip"]) != "198.51.100.23" {
+		t.Fatalf("network = %#v", network)
+	}
+	if net.ParseIP(str(network["observed_ip"])) == nil {
+		t.Fatalf("observed_ip = %#v, network = %#v", network["observed_ip"], network)
+	}
+	if listing := formatAgentsText(agents); !strings.Contains(listing, "动态IP 198.51.100.23") {
+		t.Fatalf("agent listing missing IP mode: %q", listing)
+	}
+}
+
+func TestUpdateAgentIPModePreservesEnrollment(t *testing.T) {
+	state := t.TempDir()
+	path := agentEnrollmentPath(state)
+	if err := writeJSON(path, obj{
+		"hub_url":     "https://hub.example:8443",
+		"agent_id":    "agent-a",
+		"role":        "transit",
+		"token_file":  filepath.Join(state, "agent-token"),
+		"ca_cert":     filepath.Join(state, "hub-ca.crt"),
+		"client_cert": filepath.Join(state, "agent.crt"),
+		"client_key":  filepath.Join(state, "agent.key"),
+		"created_at":  int64(123),
+	}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res, err := updateAgentIPMode(state, "dynamic", 1800)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if str(res["ip_mode"]) != "dynamic" || int64Value(res["public_ip_interval_seconds"]) != 1800 {
+		t.Fatalf("result = %#v", res)
+	}
+	cfg, err := loadAgentEnrollment(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.IPMode != "dynamic" || cfg.PublicIPIntervalSeconds != 1800 || cfg.HubURL != "https://hub.example:8443" {
+		t.Fatalf("updated enrollment = %#v", cfg)
+	}
+}
+
+func TestDynamicIPProbeErrorsAreThrottled(t *testing.T) {
+	poller := newAgentPoller("http://127.0.0.1", "agent-a", "secret", "landing", t.TempDir(), "", 0, time.Second, 0)
+	poller.ipMode = "dynamic"
+	poller.publicIPInterval = time.Hour
+	probes := 0
+	poller.publicIPProbe = func(time.Duration) (string, error) {
+		probes++
+		return "", errors.New("probe unavailable")
+	}
+	first := poller.network()
+	second := poller.network()
+	if probes != 1 {
+		t.Fatalf("public IP probe should be throttled after errors, got %d", probes)
+	}
+	if str(first["public_ip_error"]) == "" || str(second["public_ip_error"]) == "" {
+		t.Fatalf("probe error not reported: first=%#v second=%#v", first, second)
+	}
+}
+
+func TestDynamicIPProbeTimeoutIsCapped(t *testing.T) {
+	poller := newAgentPoller("http://127.0.0.1", "agent-a", "secret", "landing", t.TempDir(), "", 0, 30*time.Second, 0)
+	poller.ipMode = "dynamic"
+	var got time.Duration
+	poller.publicIPProbe = func(timeout time.Duration) (string, error) {
+		got = timeout
+		return "198.51.100.42", nil
+	}
+	_ = poller.network()
+	if got > defaultPublicIPProbeTimeout {
+		t.Fatalf("public IP probe timeout = %s, want <= %s", got, defaultPublicIPProbeTimeout)
 	}
 }
 

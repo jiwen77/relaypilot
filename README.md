@@ -197,6 +197,10 @@ relaypilot agent enroll --invite 'PASTE_INVITE' --install-service
 relaypilot transit-init-reality      # transit host
 relaypilot landing-install-ss        # landing host
 
+# Agent IP mode defaults to static: no extra public-IP probe.
+# If a node's public IP may change, enable low-frequency dynamic reporting:
+relaypilot agent ip-mode --mode dynamic --public-ip-interval 600
+
 # After both agents are online, link transit -> landing from the Hub.
 # Hub asks the landing agent for the full endpoint over the signed control plane,
 # then queues a bind task to the transit agent. No endpoint JSON copy is needed.
@@ -231,6 +235,11 @@ control-plane port to known agent IPs when possible.
 For small NAT boxes, the poll loop reuses topology snapshots by default,
 caps each poll batch, limits JSON/HTTP body sizes, and backs off on Hub/network
 errors so it does not spin CPU or grow memory during outages.
+Agent IP reporting is also lightweight: `static` mode sends only normal
+heartbeat metadata, while `dynamic` mode adds a short public-IP HTTPS probe
+every 10 minutes by default, with a fallback endpoint only on failure. Hub
+records the reported/observed IP for visibility; it does not automatically
+rewrite Reality/Shadowsocks/WireGuard configs.
 To install or inspect bounded services, use the menu path:
 
 ```bash

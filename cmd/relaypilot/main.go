@@ -60,6 +60,8 @@ const (
 	defaultHubTLSDays              = 3650
 	defaultAgentCertDays           = 1095
 	defaultEnrollCodeTTLSeconds    = 600
+	defaultPublicIPIntervalSeconds = 600
+	defaultPublicIPProbeTimeout    = 3 * time.Second
 	agentAuthSkewSeconds           = 300
 	heartbeatStaleSeconds          = 120
 	heartbeatOfflineSeconds        = 600
@@ -807,6 +809,8 @@ func run(args []string) error {
 		clientCert := fs.String("client-cert", "", "agent client certificate for mTLS")
 		clientKey := fs.String("client-key", "", "agent client private key for mTLS")
 		tlsServerName := fs.String("tls-server-name", "", "override TLS server name")
+		ipMode := fs.String("ip-mode", "", "agent IP mode: static or dynamic")
+		publicIPInterval := fs.Int("public-ip-interval", 0, "seconds between public IP probes in dynamic mode")
 		maxTasks := fs.Int("max-tasks", 5, "max tasks")
 		topologyInterval := fs.Int("topology-interval", 0, "reuse topology snapshot for this many seconds; 0 disables cache")
 		timeout := fs.Int("timeout", 10, "HTTP timeout seconds")
@@ -815,7 +819,7 @@ func run(args []string) error {
 		if _, err := parseLabels(*labels); err != nil {
 			return err
 		}
-		if err := applyAgentEnrollmentDefaults(*enrollmentFile, hubURL, agentID, role, tokenFile, caCert, clientCert, clientKey); err != nil {
+		if err := applyAgentEnrollmentDefaults(*enrollmentFile, hubURL, agentID, role, tokenFile, caCert, clientCert, clientKey, ipMode, publicIPInterval); err != nil {
 			return err
 		}
 		if *role == "" {
@@ -831,6 +835,9 @@ func run(args []string) error {
 		}
 		poller := newAgentPoller(*hubURL, *agentID, secret, *role, *stateDir, *conf, *maxTasks, time.Duration(*timeout)*time.Second, *topologyInterval)
 		poller.tlsConfig = tlsConfig
+		if err := configurePollerNetwork(poller, *ipMode, *publicIPInterval); err != nil {
+			return err
+		}
 		res, err := poller.pollOnce()
 		if err != nil {
 			return err
@@ -852,6 +859,8 @@ func run(args []string) error {
 		clientCert := fs.String("client-cert", "", "agent client certificate for mTLS")
 		clientKey := fs.String("client-key", "", "agent client private key for mTLS")
 		tlsServerName := fs.String("tls-server-name", "", "override TLS server name")
+		ipMode := fs.String("ip-mode", "", "agent IP mode: static or dynamic")
+		publicIPInterval := fs.Int("public-ip-interval", 0, "seconds between public IP probes in dynamic mode")
 		interval := fs.Int("interval", 30, "poll interval seconds")
 		maxTasks := fs.Int("max-tasks", 5, "max tasks")
 		topologyInterval := fs.Int("topology-interval", defaultTopologyInterval, "reuse topology snapshot for this many seconds")
@@ -861,7 +870,7 @@ func run(args []string) error {
 		if _, err := parseLabels(*labels); err != nil {
 			return err
 		}
-		if err := applyAgentEnrollmentDefaults(*enrollmentFile, hubURL, agentID, role, tokenFile, caCert, clientCert, clientKey); err != nil {
+		if err := applyAgentEnrollmentDefaults(*enrollmentFile, hubURL, agentID, role, tokenFile, caCert, clientCert, clientKey, ipMode, publicIPInterval); err != nil {
 			return err
 		}
 		if *role == "" {
@@ -875,7 +884,7 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		return agentPollLoopWithTLS(*hubURL, *agentID, secret, *role, *stateDir, *conf, *interval, *maxTasks, time.Duration(*timeout)*time.Second, *topologyInterval, tlsConfig)
+		return agentPollLoopWithTLSAndNetwork(*hubURL, *agentID, secret, *role, *stateDir, *conf, *interval, *maxTasks, time.Duration(*timeout)*time.Second, *topologyInterval, tlsConfig, *ipMode, *publicIPInterval)
 	case "agent-enroll":
 		fs := flag.NewFlagSet(args[0], flag.ExitOnError)
 		stateDir := fs.String("state-dir", defaultStateDir, "state directory")
@@ -892,6 +901,8 @@ func run(args []string) error {
 		labels := fs.String("labels", "", "comma-separated key=value labels for --code enrollment")
 		caCert := fs.String("ca-cert", "", "CA certificate for HTTPS Hub verification during --code enrollment")
 		tlsServerName := fs.String("tls-server-name", "", "override TLS server name during --code enrollment")
+		ipMode := fs.String("ip-mode", "static", "agent IP mode: static or dynamic")
+		publicIPInterval := fs.Int("public-ip-interval", defaultPublicIPIntervalSeconds, "seconds between public IP probes in dynamic mode")
 		pollOnce := fs.Bool("poll-once", false, "run one heartbeat poll after writing files")
 		conf := fs.String("conf", defaultConfDir, "sing-box config file or directory")
 		timeout := fs.Int("timeout", 10, "HTTP timeout seconds")
@@ -914,15 +925,17 @@ func run(args []string) error {
 			*invite = strings.TrimSpace(string(data))
 		}
 		opts := agentEnrollOptions{
-			StateDir:      *stateDir,
-			HubURL:        *hubURL,
-			Code:          *code,
-			AgentID:       *agentID,
-			Role:          *role,
-			Name:          *name,
-			Labels:        *labels,
-			CACertPath:    *caCert,
-			TLSServerName: *tlsServerName,
+			StateDir:                *stateDir,
+			HubURL:                  *hubURL,
+			Code:                    *code,
+			AgentID:                 *agentID,
+			Role:                    *role,
+			Name:                    *name,
+			Labels:                  *labels,
+			CACertPath:              *caCert,
+			TLSServerName:           *tlsServerName,
+			IPMode:                  *ipMode,
+			PublicIPIntervalSeconds: *publicIPInterval,
 		}
 		var res obj
 		var err error
@@ -952,11 +965,32 @@ func run(args []string) error {
 			if err != nil {
 				return err
 			}
-			pollRes, err := agentPollOnceWithTLS(cfg.HubURL, cfg.AgentID, strings.TrimSpace(string(tokenData)), cfg.Role, *stateDir, *conf, 0, 10*time.Second, tlsConfig)
+			poller := newAgentPoller(cfg.HubURL, cfg.AgentID, strings.TrimSpace(string(tokenData)), cfg.Role, *stateDir, *conf, 0, 10*time.Second, 0)
+			poller.tlsConfig = tlsConfig
+			if err := configurePollerNetwork(poller, cfg.IPMode, cfg.PublicIPIntervalSeconds); err != nil {
+				return err
+			}
+			pollRes, err := poller.pollOnce()
 			if err != nil {
 				return err
 			}
 			res["poll"] = pollRes
+		}
+		return printJSON(res)
+	case "agent-set-ip-mode":
+		fs := flag.NewFlagSet(args[0], flag.ExitOnError)
+		stateDir := fs.String("state-dir", defaultStateDir, "state directory")
+		mode := fs.String("mode", "", "agent IP mode: static or dynamic")
+		ipMode := fs.String("ip-mode", "", "alias for --mode")
+		publicIPInterval := fs.Int("public-ip-interval", defaultPublicIPIntervalSeconds, "seconds between public IP probes in dynamic mode")
+		_ = fs.Parse(args[1:])
+		selectedMode := firstNonEmpty(*mode, *ipMode)
+		if selectedMode == "" && fs.NArg() > 0 {
+			selectedMode = fs.Arg(0)
+		}
+		res, err := updateAgentIPMode(*stateDir, selectedMode, *publicIPInterval)
+		if err != nil {
+			return err
 		}
 		return printJSON(res)
 	default:
@@ -1006,11 +1040,12 @@ Commands:
   hub-alert-callback [--state-dir DIR] --data rp:obs:TOKEN
   hub-daemon [--state-dir DIR] [--host 127.0.0.1] [--port 8080] [--tls-cert CRT --tls-key KEY --client-ca CA --require-client-cert]
   bot-daemon [--state-dir DIR]
-  agent-enroll --invite INVITE [--poll-once]
+  agent-enroll --invite INVITE [--ip-mode static|dynamic] [--poll-once]
+  agent-set-ip-mode --mode static|dynamic [--public-ip-interval 600]
   agent-enroll --code CODE --hub-url https://HUB:8443 --agent-id ID --role transit|landing [--ca-cert CA]
   agent-enroll --bundle BUNDLE [--poll-once]
   agent-poll-once --hub-url URL --agent-id ID --role transit|landing --token-file FILE [--ca-cert CA --client-cert CRT --client-key KEY]
-  agent-poll-loop --hub-url URL --agent-id ID --role transit|landing --token-file FILE [--ca-cert CA --client-cert CRT --client-key KEY]
+  agent-poll-loop --hub-url URL --agent-id ID --role transit|landing --token-file FILE [--ip-mode static|dynamic] [--ca-cert CA --client-cert CRT --client-key KEY]
   agent-poll-once --enrollment-file /etc/relaypilot/agent-enrollment.json
   agent-poll-loop --enrollment-file /etc/relaypilot/agent-enrollment.json
 `)
@@ -1312,26 +1347,30 @@ type hubPublicURLOptions struct {
 }
 
 type agentEnrollOptions struct {
-	StateDir      string
-	HubURL        string
-	Code          string
-	AgentID       string
-	Role          string
-	Name          string
-	Labels        string
-	CACertPath    string
-	TLSServerName string
+	StateDir                string
+	HubURL                  string
+	Code                    string
+	AgentID                 string
+	Role                    string
+	Name                    string
+	Labels                  string
+	CACertPath              string
+	TLSServerName           string
+	IPMode                  string
+	PublicIPIntervalSeconds int
 }
 
 type agentEnrollmentConfig struct {
-	HubURL         string `json:"hub_url"`
-	AgentID        string `json:"agent_id"`
-	Role           string `json:"role"`
-	TokenFile      string `json:"token_file"`
-	CACertPath     string `json:"ca_cert"`
-	ClientCertPath string `json:"client_cert"`
-	ClientKeyPath  string `json:"client_key"`
-	CreatedAt      int64  `json:"created_at"`
+	HubURL                  string `json:"hub_url"`
+	AgentID                 string `json:"agent_id"`
+	Role                    string `json:"role"`
+	TokenFile               string `json:"token_file"`
+	CACertPath              string `json:"ca_cert"`
+	ClientCertPath          string `json:"client_cert"`
+	ClientKeyPath           string `json:"client_key"`
+	IPMode                  string `json:"ip_mode"`
+	PublicIPIntervalSeconds int    `json:"public_ip_interval_seconds"`
+	CreatedAt               int64  `json:"created_at"`
 }
 
 func splitCSV(value string) []string {
@@ -1858,11 +1897,18 @@ func formatHostForURL(host string) string {
 }
 
 func detectPublicIP() (string, error) {
+	return detectPublicIPWithTimeout(5 * time.Second)
+}
+
+func detectPublicIPWithTimeout(timeout time.Duration) (string, error) {
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
 	endpoints := []string{
 		"https://api.ipify.org",
 		"https://ifconfig.me/ip",
 	}
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := &http.Client{Timeout: timeout}
 	var errs []string
 	for _, endpoint := range endpoints {
 		req, err := http.NewRequest("GET", endpoint, nil)
@@ -2004,7 +2050,7 @@ func agentEnrollBundle(bundle string, opts agentEnrollOptions) (obj, error) {
 	if token == "" {
 		return nil, errors.New("enrollment token is empty")
 	}
-	return writeAgentEnrollmentFromPayload(decoded, token, opts.StateDir)
+	return writeAgentEnrollmentFromPayload(decoded, token, opts)
 }
 
 func agentEnrollInvite(invite string, opts agentEnrollOptions, timeout time.Duration) (obj, error) {
@@ -2057,7 +2103,7 @@ func agentEnrollInvite(invite string, opts agentEnrollOptions, timeout time.Dura
 	if token == "" {
 		return nil, errors.New("Hub enrollment response did not include a token")
 	}
-	return writeAgentEnrollmentFromPayload(enrollment, token, opts.StateDir)
+	return writeAgentEnrollmentFromPayload(enrollment, token, opts)
 }
 
 func agentEnrollCode(opts agentEnrollOptions, timeout time.Duration) (obj, error) {
@@ -2096,7 +2142,7 @@ func agentEnrollCode(opts agentEnrollOptions, timeout time.Duration) (obj, error
 	if token == "" {
 		return nil, errors.New("Hub enrollment response did not include a token")
 	}
-	return writeAgentEnrollmentFromPayload(enrollment, token, opts.StateDir)
+	return writeAgentEnrollmentFromPayload(enrollment, token, opts)
 }
 
 func tlsConfigFromCAPEM(caPEM, serverName string) (*tls.Config, error) {
@@ -2115,9 +2161,18 @@ func tlsConfigFromCAPEM(caPEM, serverName string) (*tls.Config, error) {
 	return cfg, nil
 }
 
-func writeAgentEnrollmentFromPayload(decoded obj, token, stateDir string) (obj, error) {
+func writeAgentEnrollmentFromPayload(decoded obj, token string, opts agentEnrollOptions) (obj, error) {
+	stateDir := opts.StateDir
 	if stateDir == "" {
 		stateDir = defaultStateDir
+	}
+	ipMode, err := normalizeIPMode(opts.IPMode)
+	if err != nil {
+		return nil, err
+	}
+	publicIPIntervalSeconds := opts.PublicIPIntervalSeconds
+	if publicIPIntervalSeconds <= 0 {
+		publicIPIntervalSeconds = defaultPublicIPIntervalSeconds
 	}
 	agentID, err := ensureSafeName(str(decoded["agent_id"]), "agent.id")
 	if err != nil {
@@ -2136,14 +2191,16 @@ func writeAgentEnrollmentFromPayload(decoded obj, token, stateDir string) (obj, 
 		return nil, errors.New("enrollment token is empty")
 	}
 	paths := agentEnrollmentConfig{
-		HubURL:         hubURL,
-		AgentID:        agentID,
-		Role:           role,
-		TokenFile:      filepath.Join(stateDir, "agent-token"),
-		CACertPath:     filepath.Join(stateDir, "hub-ca.crt"),
-		ClientCertPath: filepath.Join(stateDir, "agent.crt"),
-		ClientKeyPath:  filepath.Join(stateDir, "agent.key"),
-		CreatedAt:      now(),
+		HubURL:                  hubURL,
+		AgentID:                 agentID,
+		Role:                    role,
+		TokenFile:               filepath.Join(stateDir, "agent-token"),
+		CACertPath:              filepath.Join(stateDir, "hub-ca.crt"),
+		ClientCertPath:          filepath.Join(stateDir, "agent.crt"),
+		ClientKeyPath:           filepath.Join(stateDir, "agent.key"),
+		IPMode:                  ipMode,
+		PublicIPIntervalSeconds: publicIPIntervalSeconds,
+		CreatedAt:               now(),
 	}
 	if err := writePEMFile(paths.CACertPath, []byte(str(decoded["ca_cert_pem"])), 0o644); err != nil {
 		return nil, err
@@ -2161,16 +2218,18 @@ func writeAgentEnrollmentFromPayload(decoded obj, token, stateDir string) (obj, 
 		return nil, err
 	}
 	return obj{
-		"agent_id":        paths.AgentID,
-		"role":            paths.Role,
-		"hub_url":         paths.HubURL,
-		"enrollment_file": agentEnrollmentPath(stateDir),
-		"token_file":      paths.TokenFile,
-		"ca_cert":         paths.CACertPath,
-		"client_cert":     paths.ClientCertPath,
-		"client_key":      paths.ClientKeyPath,
-		"poll_once":       fmt.Sprintf("relaypilot agent poll-once --enrollment-file %s", agentEnrollmentPath(stateDir)),
-		"install_service": fmt.Sprintf("relaypilot agent install-service --enrollment-file %s", agentEnrollmentPath(stateDir)),
+		"agent_id":                   paths.AgentID,
+		"role":                       paths.Role,
+		"hub_url":                    paths.HubURL,
+		"enrollment_file":            agentEnrollmentPath(stateDir),
+		"token_file":                 paths.TokenFile,
+		"ca_cert":                    paths.CACertPath,
+		"client_cert":                paths.ClientCertPath,
+		"client_key":                 paths.ClientKeyPath,
+		"ip_mode":                    paths.IPMode,
+		"public_ip_interval_seconds": paths.PublicIPIntervalSeconds,
+		"poll_once":                  fmt.Sprintf("relaypilot agent poll-once --enrollment-file %s", agentEnrollmentPath(stateDir)),
+		"install_service":            fmt.Sprintf("relaypilot agent install-service --enrollment-file %s", agentEnrollmentPath(stateDir)),
 	}, nil
 }
 
@@ -2319,14 +2378,16 @@ func loadAgentEnrollment(stateDir string) (agentEnrollmentConfig, error) {
 		return agentEnrollmentConfig{}, err
 	}
 	return agentEnrollmentConfig{
-		HubURL:         str(data["hub_url"]),
-		AgentID:        str(data["agent_id"]),
-		Role:           str(data["role"]),
-		TokenFile:      str(data["token_file"]),
-		CACertPath:     str(data["ca_cert"]),
-		ClientCertPath: str(data["client_cert"]),
-		ClientKeyPath:  str(data["client_key"]),
-		CreatedAt:      int64Value(data["created_at"]),
+		HubURL:                  str(data["hub_url"]),
+		AgentID:                 str(data["agent_id"]),
+		Role:                    str(data["role"]),
+		TokenFile:               str(data["token_file"]),
+		CACertPath:              str(data["ca_cert"]),
+		ClientCertPath:          str(data["client_cert"]),
+		ClientKeyPath:           str(data["client_key"]),
+		IPMode:                  str(data["ip_mode"]),
+		PublicIPIntervalSeconds: int(int64Value(data["public_ip_interval_seconds"])),
+		CreatedAt:               int64Value(data["created_at"]),
 	}, nil
 }
 
@@ -2336,18 +2397,20 @@ func loadAgentEnrollmentFile(path string) (agentEnrollmentConfig, error) {
 		return agentEnrollmentConfig{}, err
 	}
 	return agentEnrollmentConfig{
-		HubURL:         str(data["hub_url"]),
-		AgentID:        str(data["agent_id"]),
-		Role:           str(data["role"]),
-		TokenFile:      str(data["token_file"]),
-		CACertPath:     str(data["ca_cert"]),
-		ClientCertPath: str(data["client_cert"]),
-		ClientKeyPath:  str(data["client_key"]),
-		CreatedAt:      int64Value(data["created_at"]),
+		HubURL:                  str(data["hub_url"]),
+		AgentID:                 str(data["agent_id"]),
+		Role:                    str(data["role"]),
+		TokenFile:               str(data["token_file"]),
+		CACertPath:              str(data["ca_cert"]),
+		ClientCertPath:          str(data["client_cert"]),
+		ClientKeyPath:           str(data["client_key"]),
+		IPMode:                  str(data["ip_mode"]),
+		PublicIPIntervalSeconds: int(int64Value(data["public_ip_interval_seconds"])),
+		CreatedAt:               int64Value(data["created_at"]),
 	}, nil
 }
 
-func applyAgentEnrollmentDefaults(path string, hubURL, agentID, role, tokenFile, caCert, clientCert, clientKey *string) error {
+func applyAgentEnrollmentDefaults(path string, hubURL, agentID, role, tokenFile, caCert, clientCert, clientKey, ipMode *string, publicIPInterval *int) error {
 	if path == "" {
 		return nil
 	}
@@ -2376,7 +2439,43 @@ func applyAgentEnrollmentDefaults(path string, hubURL, agentID, role, tokenFile,
 	if *clientKey == "" {
 		*clientKey = cfg.ClientKeyPath
 	}
+	if ipMode != nil && *ipMode == "" {
+		*ipMode = cfg.IPMode
+	}
+	if publicIPInterval != nil && *publicIPInterval <= 0 {
+		*publicIPInterval = cfg.PublicIPIntervalSeconds
+	}
 	return nil
+}
+
+func updateAgentIPMode(stateDir, mode string, publicIPIntervalSeconds int) (obj, error) {
+	if stateDir == "" {
+		stateDir = defaultStateDir
+	}
+	cfg, err := loadAgentEnrollment(stateDir)
+	if err != nil {
+		return nil, err
+	}
+	normalized, err := normalizeIPMode(mode)
+	if err != nil {
+		return nil, err
+	}
+	if publicIPIntervalSeconds <= 0 {
+		publicIPIntervalSeconds = defaultPublicIPIntervalSeconds
+	}
+	cfg.IPMode = normalized
+	cfg.PublicIPIntervalSeconds = publicIPIntervalSeconds
+	if err := writeJSON(agentEnrollmentPath(stateDir), cfg, 0o600); err != nil {
+		return nil, err
+	}
+	return obj{
+		"agent_id":                   cfg.AgentID,
+		"role":                       cfg.Role,
+		"hub_url":                    cfg.HubURL,
+		"enrollment_file":            agentEnrollmentPath(stateDir),
+		"ip_mode":                    cfg.IPMode,
+		"public_ip_interval_seconds": cfg.PublicIPIntervalSeconds,
+	}, nil
 }
 
 type certRequest struct {
@@ -3361,7 +3460,7 @@ func healthFromTopology(topo obj) obj {
 	return obj{"status": status, "checked_at": now(), "errors": topo["errors"]}
 }
 
-func updateHeartbeat(stateDir, agentID string, topology, health obj) (obj, error) {
+func updateHeartbeat(stateDir, agentID string, topology, health, network obj) (obj, error) {
 	if _, err := ensureSafeName(agentID, "agent.id"); err != nil {
 		return nil, err
 	}
@@ -3381,6 +3480,9 @@ func updateHeartbeat(stateDir, agentID string, topology, health obj) (obj, error
 	}
 	if health != nil {
 		agent["health"] = health
+	}
+	if network != nil {
+		agent["network"] = network
 	}
 	agents[agentID] = agent
 	reg["agents"] = agents
@@ -4908,6 +5010,30 @@ func roleLabel(role string) string {
 	}
 }
 
+func agentNetworkLabel(agent obj) string {
+	network := asObj(agent["network"])
+	mode, _ := normalizeIPMode(str(network["ip_mode"]))
+	if mode == "" {
+		mode = "static"
+	}
+	if mode == "dynamic" {
+		if ip := str(network["public_ip"]); ip != "" {
+			return "动态IP " + ip
+		}
+		if errText := str(network["public_ip_error"]); errText != "" {
+			return "动态IP 探测失败"
+		}
+		return "动态IP"
+	}
+	if ip := str(network["observed_ip"]); ip != "" {
+		return "静态IP " + ip
+	}
+	if len(network) > 0 {
+		return "静态IP"
+	}
+	return ""
+}
+
 func formatAgentsText(agents []obj) string {
 	if len(agents) == 0 {
 		return "暂无已注册 agent。"
@@ -4919,6 +5045,9 @@ func formatAgentsText(agents []obj) string {
 		suffix := ""
 		if labels != "" {
 			suffix = " · " + labels
+		}
+		if networkLabel := agentNetworkLabel(agent); networkLabel != "" {
+			suffix += " · " + networkLabel
 		}
 		fmt.Fprintf(&b, "%s %s %s · %s · %s%s\n", livenessIcon(agent), roleIcon(str(agent["role"])), str(agent["id"]), str(agent["name"]), livenessLabel(agent), suffix)
 	}
@@ -6773,12 +6902,19 @@ type agentPoller struct {
 	role             string
 	stateDir         string
 	conf             string
+	ipMode           string
 	maxTasks         int
 	timeout          time.Duration
 	topologyInterval time.Duration
+	publicIPInterval time.Duration
+	publicIPProbe    func(time.Duration) (string, error)
 	cachedTopology   obj
 	cachedHealth     obj
 	topologyExpires  time.Time
+	cachedPublicIP   string
+	publicIPChecked  int64
+	publicIPExpires  time.Time
+	publicIPError    string
 	tlsConfig        *tls.Config
 }
 
@@ -6802,10 +6938,39 @@ func newAgentPoller(hubURL, agentID, token, role, stateDir, conf string, maxTask
 		role:             role,
 		stateDir:         stateDir,
 		conf:             conf,
+		ipMode:           "static",
 		maxTasks:         maxTasks,
 		timeout:          timeout,
 		topologyInterval: time.Duration(topologyIntervalSeconds) * time.Second,
+		publicIPInterval: time.Duration(defaultPublicIPIntervalSeconds) * time.Second,
+		publicIPProbe:    detectPublicIPWithTimeout,
 	}
+}
+
+func normalizeIPMode(mode string) (string, error) {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if mode == "" {
+		return "static", nil
+	}
+	switch mode {
+	case "static", "dynamic":
+		return mode, nil
+	default:
+		return "", fmt.Errorf("ip-mode must be static or dynamic: %q", mode)
+	}
+}
+
+func configurePollerNetwork(p *agentPoller, ipMode string, publicIPIntervalSeconds int) error {
+	mode, err := normalizeIPMode(ipMode)
+	if err != nil {
+		return err
+	}
+	p.ipMode = mode
+	if publicIPIntervalSeconds <= 0 {
+		publicIPIntervalSeconds = defaultPublicIPIntervalSeconds
+	}
+	p.publicIPInterval = time.Duration(publicIPIntervalSeconds) * time.Second
+	return nil
 }
 
 func (p *agentPoller) topology() (obj, obj) {
@@ -6822,13 +6987,66 @@ func (p *agentPoller) topology() (obj, obj) {
 	return topo, health
 }
 
+func (p *agentPoller) publicIP() (string, int64, string) {
+	if p.publicIPInterval <= 0 {
+		p.publicIPInterval = time.Duration(defaultPublicIPIntervalSeconds) * time.Second
+	}
+	if time.Now().Before(p.publicIPExpires) {
+		return p.cachedPublicIP, p.publicIPChecked, p.publicIPError
+	}
+	probe := p.publicIPProbe
+	if probe == nil {
+		probe = detectPublicIPWithTimeout
+	}
+	probeTimeout := defaultPublicIPProbeTimeout
+	if p.timeout > 0 && p.timeout < probeTimeout {
+		probeTimeout = p.timeout
+	}
+	ip, err := probe(probeTimeout)
+	p.publicIPChecked = now()
+	p.publicIPExpires = time.Now().Add(p.publicIPInterval)
+	if err != nil {
+		p.publicIPError = err.Error()
+		return p.cachedPublicIP, p.publicIPChecked, p.publicIPError
+	}
+	if parsed := net.ParseIP(strings.TrimSpace(ip)); parsed == nil {
+		p.publicIPError = "public IP probe returned non-IP: " + strings.TrimSpace(ip)
+		return p.cachedPublicIP, p.publicIPChecked, p.publicIPError
+	}
+	p.cachedPublicIP = strings.TrimSpace(ip)
+	p.publicIPError = ""
+	return p.cachedPublicIP, p.publicIPChecked, ""
+}
+
+func (p *agentPoller) network() obj {
+	mode, err := normalizeIPMode(p.ipMode)
+	if err != nil {
+		mode = "static"
+	}
+	network := obj{"ip_mode": mode, "reported_at": now()}
+	if mode != "dynamic" {
+		return network
+	}
+	publicIP, checkedAt, probeErr := p.publicIP()
+	if publicIP != "" {
+		network["public_ip"] = publicIP
+	}
+	if checkedAt > 0 {
+		network["public_ip_checked_at"] = checkedAt
+	}
+	if probeErr != "" {
+		network["public_ip_error"] = probeErr
+	}
+	return network
+}
+
 func (p *agentPoller) pollOnce() (obj, error) {
 	if p.hubURL == "" || p.agentID == "" {
 		return nil, errors.New("hub-url and agent-id are required")
 	}
 	topo, health := p.topology()
 	base := strings.TrimRight(p.hubURL, "/")
-	heartbeat, err := httpJSONRequestWithTLS("POST", base+"/api/agents/"+url.PathEscape(p.agentID)+"/heartbeat", obj{"topology": topo, "health": health}, p.token, p.agentID, p.timeout, p.tlsConfig)
+	heartbeat, err := httpJSONRequestWithTLS("POST", base+"/api/agents/"+url.PathEscape(p.agentID)+"/heartbeat", obj{"topology": topo, "health": health, "network": p.network()}, p.token, p.agentID, p.timeout, p.tlsConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -6864,11 +7082,18 @@ func agentPollLoop(hubURL, agentID, token, role, stateDir, conf string, interval
 }
 
 func agentPollLoopWithTLS(hubURL, agentID, token, role, stateDir, conf string, interval, maxTasks int, timeout time.Duration, topologyIntervalSeconds int, tlsConfig *tls.Config) error {
+	return agentPollLoopWithTLSAndNetwork(hubURL, agentID, token, role, stateDir, conf, interval, maxTasks, timeout, topologyIntervalSeconds, tlsConfig, "static", defaultPublicIPIntervalSeconds)
+}
+
+func agentPollLoopWithTLSAndNetwork(hubURL, agentID, token, role, stateDir, conf string, interval, maxTasks int, timeout time.Duration, topologyIntervalSeconds int, tlsConfig *tls.Config, ipMode string, publicIPIntervalSeconds int) error {
 	if interval < 1 {
 		interval = 1
 	}
 	poller := newAgentPoller(hubURL, agentID, token, role, stateDir, conf, maxTasks, timeout, topologyIntervalSeconds)
 	poller.tlsConfig = tlsConfig
+	if err := configurePollerNetwork(poller, ipMode, publicIPIntervalSeconds); err != nil {
+		return err
+	}
 	backoff := time.Duration(interval) * time.Second
 	maxBackoff := 5 * time.Minute
 	for {
@@ -6956,7 +7181,12 @@ func (s *hubServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !try(json.Unmarshal(body, &payload)) {
 			return
 		}
-		agent, err := updateHeartbeat(s.stateDir, agentID, asObj(payload["topology"]), asObj(payload["health"]))
+		network := asObj(payload["network"])
+		if observedIP := observedIPFromRequest(r); observedIP != "" {
+			network["observed_ip"] = observedIP
+			network["observed_at"] = now()
+		}
+		agent, err := updateHeartbeat(s.stateDir, agentID, asObj(payload["topology"]), asObj(payload["health"]), network)
 		if !try(err) {
 			return
 		}
@@ -7008,6 +7238,18 @@ func (s *hubServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeHTTPJSON(w, 404, obj{"ok": false, "error": "not found"})
+}
+
+func observedIPFromRequest(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	host = strings.TrimSpace(strings.Trim(host, "[]"))
+	if net.ParseIP(host) == nil {
+		return ""
+	}
+	return host
 }
 
 func (s *hubServer) requireAuth(w http.ResponseWriter, r *http.Request, body []byte, agentID string) bool {
