@@ -56,7 +56,7 @@ Or run automation:
 
 ```bash
 relaypilot update
-relaypilot update --version v0.1.0 --restart-services
+relaypilot update --version v0.1.1 --restart-services
 ```
 
 This updates the entrypoint and Go core. Restart Hub/Agent/Bot services to make

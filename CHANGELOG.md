@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.1
+
+- Add short-lived visible Hub invites with remembered public Hub URL defaults.
+- Add Agent static/dynamic public IP reporting mode.
+- Add public service entries for forwarded Reality/Shadowsocks/WireGuard endpoints.
+- Harden Hub setup and service reset flows for live deployment.
+- Improve interactive Hub/Agent menus for role-first deployment.
+
 ## 0.1.0
 
 - Start clean single-entry RelayPilot project.
