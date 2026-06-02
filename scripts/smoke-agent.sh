@@ -100,7 +100,7 @@ printf '0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
   bash ./relaypilot.sh transit > "$ROOT/transit-menu.out"
 
 STATE_DIR="$ROOT/state" bash ./relaypilot.sh hub-init-tls --host hub.example > "$ROOT/hub-tls.out"
-printf '2\nsmoke-interactive\nhub.example\n10m\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
+printf '2\nsmoke-interactive\nhub.example\n8443\n10m\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
   bash ./relaypilot.sh hub-enroll > "$ROOT/hub-enroll.out"
 RELAYPILOT_PROFILE=tiny bash ./relaypilot.sh resource-profile > "$ROOT/profile-tiny.out"
 bash ./relaypilot.sh migrate-state --from "$ROOT/state" --to "$ROOT/migrated-state" --dry-run > "$ROOT/migrate-dry.out"
@@ -113,13 +113,13 @@ SINGBOX_CONFIG_PATH="$ROOT/config.json" \
 RELAYPILOT_NO_ROOT=1 \
 RELAYPILOT_PROFILE=tiny \
 bash ./relaypilot.sh install-bot-service > "$ROOT/bot-service.out" 2> "$ROOT/bot-service.err"
-printf '\n\nn\n' | SYSTEMD_DIR="$ROOT/systemd" \
+printf '\n\n\nn\n' | SYSTEMD_DIR="$ROOT/systemd" \
 BIN_PATH="$ROOT/bin/relaypilot" \
 STATE_DIR="$ROOT/quick-hub" \
 CONF_DIR="$ROOT/transit-conf" \
 SINGBOX_CONFIG_PATH="$ROOT/config.json" \
 RELAYPILOT_NO_ROOT=1 \
-HUB_PUBLIC_HOST="hub.quick.example" \
+HUB_PUBLIC_HOST="https://hub.quick.example:9443" \
 RELAYPILOT_PROFILE=tiny \
 bash ./relaypilot.sh hub-quick-setup > "$ROOT/hub-quick.out" 2> "$ROOT/hub-quick.err"
 SYSTEMD_DIR="$ROOT/systemd" \
@@ -243,8 +243,11 @@ grep -q 'endpoints/hk.json' "$ROOT/migrate-dry.out"
 grep -q 'relaypilot-bot.service' "$ROOT/bot-service.out"
 grep -q 'bot-daemon' "$ROOT/systemd/relaypilot-bot.service"
 grep -q 'MemoryMax=96M' "$ROOT/systemd/relaypilot-bot.service"
-grep -q 'Hub URL 给 agent 使用：https://hub.quick.example:8443' "$ROOT/hub-quick.out"
+grep -q 'Hub URL 给 agent 使用：https://hub.quick.example:9443' "$ROOT/hub-quick.out"
+grep -q '证书 SAN 包含：hub.quick.example' "$ROOT/hub-quick.out"
 grep -q 'hub-daemon' "$ROOT/systemd/relaypilot-hub.service"
+grep -q -- '--port 9443' "$ROOT/systemd/relaypilot-hub.service"
+grep -q -- '--host 0.0.0.0' "$ROOT/systemd/relaypilot-hub.service"
 grep -q -- '--require-client-cert' "$ROOT/systemd/relaypilot-hub.service"
 [[ -f "$ROOT/quick-hub/hub-tls/ca.crt" ]]
 grep -q 'relaypilot-alert-offline.timer' "$ROOT/alert-timer.out"

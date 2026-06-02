@@ -1674,10 +1674,16 @@ func createHubEnrollInvite(stateDir string, opts hubEnrollCodeOptions) (obj, err
 func normalizeHTTPSHubURL(raw string) (string, error) {
 	raw = strings.TrimRight(strings.TrimSpace(raw), "/")
 	u, err := url.Parse(raw)
-	if err != nil || u.Scheme != "https" || u.Host == "" {
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.Hostname() == "" {
 		return "", errors.New("--hub-url must be an https URL, e.g. https://hub.example:8443")
 	}
-	return raw, nil
+	if u.Path != "" && u.Path != "/" {
+		return "", errors.New("--hub-url must not include a path")
+	}
+	if u.RawQuery != "" || u.Fragment != "" {
+		return "", errors.New("--hub-url must not include query or fragment")
+	}
+	return "https://" + u.Host, nil
 }
 
 func resolveHubPublicURL(opts hubPublicURLOptions, detect func() (string, error)) (string, error) {
@@ -1702,21 +1708,69 @@ func resolveHubPublicURL(opts hubPublicURLOptions, detect func() (string, error)
 	if host == "" {
 		return "", errors.New("public Hub host is empty; pass --hub-url or --public-host")
 	}
-	if strings.Contains(host, "://") {
-		return normalizeHTTPSHubURL(host)
+	host, hostPort, err := normalizePublicHubHost(host)
+	if err != nil {
+		return "", err
 	}
-	if strings.Contains(host, "/") {
-		return "", fmt.Errorf("public Hub host must be a host name or IP, got %q", host)
-	}
-	if strings.HasPrefix(host, "[") && strings.Contains(host, "]") {
-		// already bracketed IPv6
-	} else if ip := net.ParseIP(host); ip != nil && strings.Contains(host, ":") {
-		host = "[" + host + "]"
+	if hostPort > 0 {
+		port = hostPort
 	}
 	if port == 443 {
-		return normalizeHTTPSHubURL("https://" + host)
+		return normalizeHTTPSHubURL("https://" + formatHostForURL(host))
 	}
-	return normalizeHTTPSHubURL(fmt.Sprintf("https://%s:%d", host, port))
+	return normalizeHTTPSHubURL(fmt.Sprintf("https://%s:%d", formatHostForURL(host), port))
+}
+
+func normalizePublicHubHost(raw string) (string, int, error) {
+	raw = strings.TrimRight(strings.TrimSpace(raw), "/")
+	if raw == "" {
+		return "", 0, errors.New("public Hub host is empty")
+	}
+	if strings.Contains(raw, "://") {
+		u, err := url.Parse(raw)
+		if err != nil || u.Scheme != "https" || u.Host == "" || u.Hostname() == "" {
+			return "", 0, fmt.Errorf("public Hub host must be an https URL, DNS name, or IP, got %q", raw)
+		}
+		if u.Path != "" && u.Path != "/" {
+			return "", 0, fmt.Errorf("public Hub host must not include a path: %q", raw)
+		}
+		port, err := parseOptionalPort(u.Port())
+		if err != nil {
+			return "", 0, err
+		}
+		return u.Hostname(), port, nil
+	}
+	if strings.Contains(raw, "/") {
+		return "", 0, fmt.Errorf("public Hub host must be a host name or IP, got %q", raw)
+	}
+	if host, portString, err := net.SplitHostPort(raw); err == nil {
+		port, err := parseOptionalPort(portString)
+		if err != nil {
+			return "", 0, err
+		}
+		return strings.Trim(host, "[]"), port, nil
+	}
+	return strings.Trim(raw, "[]"), 0, nil
+}
+
+func parseOptionalPort(raw string) (int, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, nil
+	}
+	port, err := strconv.Atoi(raw)
+	if err != nil || port <= 0 || port > 65535 {
+		return 0, fmt.Errorf("invalid Hub port: %q", raw)
+	}
+	return port, nil
+}
+
+func formatHostForURL(host string) string {
+	host = strings.Trim(host, "[]")
+	if ip := net.ParseIP(host); ip != nil && strings.Contains(host, ":") {
+		return "[" + host + "]"
+	}
+	return host
 }
 
 func detectPublicIP() (string, error) {
@@ -2253,7 +2307,7 @@ type certRequest struct {
 func normalizeTLSHosts(hosts []string) []string {
 	seen := map[string]bool{}
 	add := func(v string, out *[]string) {
-		v = strings.TrimSpace(v)
+		v, _, _ = normalizePublicHubHost(v)
 		if v == "" || seen[v] {
 			return
 		}

@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -854,6 +855,63 @@ func TestHubCreateEnrollCodeCLIAcceptsPublicHost(t *testing.T) {
 	}
 	if str(out["hub_url"]) != "https://hub.example:9443" {
 		t.Fatalf("hub_url = %#v", out["hub_url"])
+	}
+}
+
+func TestResolveHubPublicURLAcceptsURLAsPublicHost(t *testing.T) {
+	tests := []struct {
+		name       string
+		publicHost string
+		port       int
+		want       string
+	}{
+		{
+			name:       "https URL without port uses selected port",
+			publicHost: "https://hub.example",
+			port:       9443,
+			want:       "https://hub.example:9443",
+		},
+		{
+			name:       "https URL with port keeps URL port",
+			publicHost: "https://hub.example:27779",
+			port:       9443,
+			want:       "https://hub.example:27779",
+		},
+		{
+			name:       "host with port keeps host port",
+			publicHost: "hub.example:27779",
+			port:       9443,
+			want:       "https://hub.example:27779",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := resolveHubPublicURL(hubPublicURLOptions{PublicHost: tt.publicHost, Port: tt.port}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tt.want {
+				t.Fatalf("hub url = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeTLSHostsAcceptsURLAndPort(t *testing.T) {
+	got := normalizeTLSHosts([]string{
+		"https://hub.example:27779",
+		"198.51.100.10:27779",
+		"[2001:db8::1]:27779",
+	})
+	for _, want := range []string{"hub.example", "198.51.100.10", "2001:db8::1"} {
+		if !slices.Contains(got, want) {
+			t.Fatalf("normalizeTLSHosts() = %#v, missing %q", got, want)
+		}
+	}
+	for _, invalid := range []string{"https://hub.example:27779", "198.51.100.10:27779", "[2001:db8::1]:27779"} {
+		if slices.Contains(got, invalid) {
+			t.Fatalf("normalizeTLSHosts() = %#v, should not include raw input %q", got, invalid)
+		}
 	}
 }
 

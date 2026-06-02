@@ -235,6 +235,66 @@ prompt() {
   printf -v "$var_name" '%s' "$value"
 }
 
+trim_url_scheme() {
+  local value="$1"
+  value="${value#https://}"
+  value="${value#http://}"
+  value="${value%%/*}"
+  printf '%s' "$value"
+}
+
+host_only() {
+  local value colons
+  value="$(trim_url_scheme "$1")"
+  if [[ "$value" == \[*\]* ]]; then
+    value="${value#\[}"
+    value="${value%%\]*}"
+  else
+    colons="${value//[^:]/}"
+    if [[ ${#colons} -eq 1 ]]; then
+      value="${value%%:*}"
+    fi
+  fi
+  printf '%s' "$value"
+}
+
+port_from_host_input() {
+  local value colons
+  value="$(trim_url_scheme "$1")"
+  if [[ "$value" == \[*\]:* ]]; then
+    value="${value##*\]:}"
+  else
+    colons="${value//[^:]/}"
+    if [[ ${#colons} -eq 1 ]]; then
+      value="${value##*:}"
+    else
+      value=""
+    fi
+  fi
+  if [[ "$value" =~ ^[0-9]+$ ]]; then
+    printf '%s' "$value"
+  fi
+  return 0
+}
+
+url_host() {
+  local value
+  value="$(host_only "$1")"
+  if [[ "$value" == *:* ]]; then
+    printf '[%s]' "$value"
+  else
+    printf '%s' "$value"
+  fi
+}
+
+hub_tls_cert_matches_host() {
+  local cert="$1" host="$2" sans
+  [[ -f "$cert" ]] || return 1
+  command -v openssl >/dev/null 2>&1 || return 1
+  sans="$(openssl x509 -in "$cert" -noout -ext subjectAltName 2>/dev/null || true)"
+  grep -Fq "DNS:${host}" <<<"$sans" || grep -Fq "IP Address:${host}" <<<"$sans"
+}
+
 select_option() {
   local var_name="$1" title_text="$2" default="${3:-}" choice idx raw value label desc
   shift 3
@@ -1027,6 +1087,10 @@ hub_enroll_wizard() {
   fi
   [[ -z "$agent_id" ]] && prompt agent_id "Agent id（英文数字短横线，例如 ${default_agent_id}）" "$default_agent_id"
   prompt public_host "Hub 公网 IP/域名（空=自动检测当前公网 IP）" "$public_host"
+  local input_port
+  input_port="$(port_from_host_input "$public_host")"
+  [[ -n "$input_port" ]] && port="$input_port"
+  prompt port "Hub HTTPS 端口" "$port"
   prompt ttl "Invite TTL" "$ttl"
   local args=(--agent-id "$agent_id" --role "$role" --ttl "$ttl" --port "$port")
   [[ -n "$public_host" ]] && args+=(--public-host "$public_host")
@@ -1343,18 +1407,28 @@ hub_quick_setup() {
   fi
   prompt public_host "Hub public IP/domain used by agents (empty = detected current IP)" "${public_host:-$detected}"
   [[ -z "$public_host" ]] && { err "需要 Hub public IP/domain；也可以稍后运行 hub-init-tls --host <IP_OR_DOMAIN>。"; return 1; }
+  local input_port cert_host public_host_for_url
+  input_port="$(port_from_host_input "$public_host")"
+  [[ -n "$input_port" ]] && port="$input_port"
+  cert_host="$(host_only "$public_host")"
+  public_host_for_url="$(url_host "$public_host")"
   prompt port "Hub HTTPS port" "$port"
   prompt listen_host "Hub listen address" "$listen_host"
+  [[ -z "$listen_host" ]] && listen_host="0.0.0.0"
 
-  if [[ -f "$STATE_DIR/hub-tls/hub.crt" && -f "$STATE_DIR/hub-tls/hub.key" && -f "$STATE_DIR/hub-tls/ca.crt" ]]; then
+  if [[ -f "$STATE_DIR/hub-tls/hub.crt" && -f "$STATE_DIR/hub-tls/hub.key" && -f "$STATE_DIR/hub-tls/ca.crt" ]] && hub_tls_cert_matches_host "$STATE_DIR/hub-tls/hub.crt" "$cert_host"; then
     info "检测到已有 Hub TLS 文件，跳过证书初始化：$STATE_DIR/hub-tls"
+  elif [[ -f "$STATE_DIR/hub-tls/hub.crt" || -f "$STATE_DIR/hub-tls/hub.key" || -f "$STATE_DIR/hub-tls/ca.crt" ]]; then
+    tls_args=(--host "$cert_host" --force)
+    info "检测到 Hub TLS 与当前地址不匹配，重新生成证书 SAN：$cert_host"
+    hub_init_tls "${tls_args[@]}"
   else
-    tls_args=(--host "$public_host")
-    info "初始化 Hub TLS，证书 SAN 包含：$public_host"
+    tls_args=(--host "$cert_host")
+    info "初始化 Hub TLS，证书 SAN 包含：$cert_host"
     hub_init_tls "${tls_args[@]}"
   fi
 
-  install_hub_service \
+  FORCE_SERVICE_FILE=1 install_hub_service \
     --host "$listen_host" \
     --port "$port" \
     --tls-cert "$STATE_DIR/hub-tls/hub.crt" \
@@ -1362,7 +1436,7 @@ hub_quick_setup() {
     --client-ca "$STATE_DIR/hub-tls/ca.crt" \
     --require-client-cert
   echo
-  info "Hub URL 给 agent 使用：https://${public_host}:${port}"
+  info "Hub URL 给 agent 使用：https://${public_host_for_url}:${port}"
   info "下一步：在 Hub 菜单生成 agent invite；agent 端粘贴 invite 即可连接。"
   if confirm "是否现在启动 ${HUB_SERVICE_NAME}" n; then
     service_action "$HUB_SERVICE_NAME" start
