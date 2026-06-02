@@ -146,6 +146,7 @@ menu_back() {
 }
 menu_prompt() {
   local var_name="$1" range="$2" value
+  echo
   read -r -p "选择 [${range}]: " value || true
   printf -v "$var_name" '%s' "$value"
 }
@@ -1595,7 +1596,7 @@ menu_title() {
   local section="$1" mode status meta heading
   mode="$(machine_mode_label)"
   status="$(menu_status_line)"
-  heading="${section} · 当前：${mode}"
+  heading="${section} v${VERSION} · 当前：${mode}"
   if [[ "$section" == "RelayPilot" ]]; then
     meta=$'安装目录：'"${INSTALL_DIR}"$'\n状态目录：'"${STATE_DIR}"
   else
@@ -1665,6 +1666,25 @@ show_service_logs() {
   fi
 }
 
+menu_update_and_reload() {
+  local rc
+  menu_clear
+  set +e
+  self_update "$@"
+  rc=$?
+  set -e
+  if (( rc != 0 )); then
+    warn "更新未完成（退出码 ${rc}）。"
+    menu_pause
+    return 0
+  fi
+  echo
+  info "已更新，正在重新打开新版面板..."
+  sleep 1
+  menu_leave_screen
+  exec "$BIN_PATH" menu
+}
+
 services_menu() {
   require_root
   while true; do
@@ -1684,7 +1704,7 @@ services_menu() {
       3) service_control_menu "$TG_SERVICE_NAME" "Telegram 服务" ;;
       4) service_control_menu "$SERVICE_NAME" "sing-box 服务" ;;
       5) menu_action resource_profile ;;
-      6) menu_action self_update ;;
+      6) menu_update_and_reload ;;
       0) return 0 ;;
       *) menu_invalid_choice ;;
     esac

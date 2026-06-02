@@ -203,7 +203,7 @@ grep -q 'dry_run' "$ROOT/tg-send.out"
 ! grep -q 'SMOKE_TOKEN' "$ROOT/tg-send.out"
 grep -q 'landing-hk-ss' "$ROOT/tg-dispatch.out"
 
-grep -q 'RelayPilot · 当前：未配置' "$ROOT/agent-menu.out"
+grep -q 'RelayPilot v.* · 当前：未配置' "$ROOT/agent-menu.out"
 grep -q 'Hub：未启用.*Agent：未启用.*代理：未启用' "$ROOT/agent-menu.out"
 grep -q 'Hub 模式' "$ROOT/agent-menu.out"
 grep -q 'Agent 模式' "$ROOT/agent-menu.out"
