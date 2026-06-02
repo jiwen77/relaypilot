@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.3
+
+- Omit the sing-box Shadowsocks outbound `network` field for dual `tcp,udp` endpoints so transit binding remains compatible with sing-box 1.12.
+
 ## 0.1.2
 
 - Make self-update replace the Bash entrypoint and Go core atomically so running services do not fail with `Text file busy`.

@@ -6421,7 +6421,7 @@ func defaultUpdateExampleVersion() string {
 	if strings.HasPrefix(buildVersion, "v") {
 		return buildVersion
 	}
-	return "v0.1.2"
+	return "v0.1.3"
 }
 
 func updateCenterReply() telegramReply {
@@ -7889,8 +7889,14 @@ func endpointToOutbound(endpoint obj) (obj, error) {
 	switch str(endpoint["protocol"]) {
 	case "shadowsocks":
 		out := obj{"type": "shadowsocks", "tag": endpoint["tag"], "server": endpoint["server"], "server_port": endpoint["server_port"], "method": endpoint["method"], "password": endpoint["password"]}
-		if str(endpoint["network"]) != "" {
-			out["network"] = endpoint["network"]
+		switch network := str(endpoint["network"]); network {
+		case "tcp", "udp":
+			out["network"] = network
+		case "", "tcp,udp", "udp,tcp":
+			// sing-box Shadowsocks outbound accepts only a single network value;
+			// omitting it preserves the default dual TCP/UDP behavior.
+		default:
+			return nil, fmt.Errorf("unsupported shadowsocks endpoint network: %s", network)
 		}
 		return out, nil
 	case "socks":

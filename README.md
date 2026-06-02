@@ -89,7 +89,7 @@ Automation:
 
 ```bash
 relaypilot update
-relaypilot update --version v0.1.2 --restart-services
+relaypilot update --version v0.1.3 --restart-services
 ```
 
 The update replaces the Bash entrypoint and Go core binary. Running services keep
@@ -361,7 +361,7 @@ TG_DRY_RUN=1 relaypilot bot send "relaypilot test"
 
 On the Hub bot, send `/start` or `/relaypilot_panel` to open the Telegram
 control panel. The update center shows copyable Telegram code blocks such as
-`/relaypilot_update transit-hk v0.1.2 --restart`; buttons do not trigger
+`/relaypilot_update transit-hk v0.1.3 --restart`; buttons do not trigger
 high-risk update actions directly.
 
 Registered read-only commands:

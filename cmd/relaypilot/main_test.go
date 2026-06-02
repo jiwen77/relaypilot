@@ -2032,8 +2032,12 @@ func TestRenderLandingImportAndBindTransit(t *testing.T) {
 	outbounds, _ := loadJSON(filepath.Join(conf, "01-outbounds.json"))
 	seenOutbound := 0
 	for _, raw := range asList(outbounds["outbounds"]) {
-		if str(asObj(raw)["tag"]) == "landing-hk-ss" {
+		outbound := asObj(raw)
+		if str(outbound["tag"]) == "landing-hk-ss" {
 			seenOutbound++
+			if outbound["network"] != nil {
+				t.Fatalf("dual-network shadowsocks outbound should omit network: %#v", outbound)
+			}
 		}
 	}
 	if seenOutbound != 1 {
