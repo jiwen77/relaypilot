@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.1.12 - 2026-06-06
+
+- Replace Hub Telegram advanced operations with a single repair action that reinstalls the daemon, registers `/relaypilot`, and restarts the service.
+- Keep command-list, remote-command deletion, and config-status checks as CLI-only repair tools instead of interactive menu items.
+
 ## 0.1.11 - 2026-06-06
 
 - Collapse Hub Telegram setup into one binding flow that configures the bot, installs the daemon, registers `/relaypilot`, and restarts the service.

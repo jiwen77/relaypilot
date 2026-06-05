@@ -205,8 +205,6 @@ printf '1\n8\n0\n0\n0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/quick-hub" \
   bash ./relaypilot.sh > "$ROOT/hub-advanced-menu.out"
 printf '1\n5\n0\n0\n0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/quick-hub" \
   bash ./relaypilot.sh > "$ROOT/hub-telegram-menu.out"
-printf '1\n5\n3\n0\n0\n0\n0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/quick-hub" \
-  bash ./relaypilot.sh > "$ROOT/hub-telegram-advanced-menu.out"
 printf '\nstored-transit\n\n\n10m\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/quick-hub" \
   bash ./relaypilot.sh hub-enroll > "$ROOT/hub-enroll-stored-default.out" 2>&1
 rm -f "$ROOT/quick-hub/hub-public.env"
@@ -363,15 +361,11 @@ grep -q '远程退役节点' "$ROOT/hub-advanced-menu.out"
 grep -q '重置 Hub' "$ROOT/hub-advanced-menu.out"
 grep -q '绑定/修改 Telegram' "$ROOT/hub-telegram-menu.out"
 grep -q '发送测试' "$ROOT/hub-telegram-menu.out"
-grep -q '高级操作' "$ROOT/hub-telegram-menu.out"
-if grep -q '安装服务' "$ROOT/hub-telegram-menu.out" || grep -q '注册命令' "$ROOT/hub-telegram-menu.out" || grep -q '命令列表' "$ROOT/hub-telegram-menu.out"; then
+grep -q '修复 Telegram 面板' "$ROOT/hub-telegram-menu.out"
+if grep -q '安装服务' "$ROOT/hub-telegram-menu.out" || grep -q '注册命令' "$ROOT/hub-telegram-menu.out" || grep -q '命令列表' "$ROOT/hub-telegram-menu.out" || grep -q '删除远端命令' "$ROOT/hub-telegram-menu.out" || grep -q '配置状态' "$ROOT/hub-telegram-menu.out"; then
   echo "Hub Telegram main menu should hide service/command implementation details" >&2
   exit 1
 fi
-grep -q 'Telegram 高级操作' "$ROOT/hub-telegram-advanced-menu.out"
-grep -q '安装/更新服务' "$ROOT/hub-telegram-advanced-menu.out"
-grep -q '注册 /relaypilot' "$ROOT/hub-telegram-advanced-menu.out"
-grep -q '命令列表' "$ROOT/hub-telegram-advanced-menu.out"
 grep -q 'Agent 高级操作' "$ROOT/agent-advanced-menu.out"
 grep -q '远程退役授权' "$ROOT/agent-advanced-menu.out"
 grep -q '退出 Hub 托管' "$ROOT/agent-advanced-menu.out"

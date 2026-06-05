@@ -58,7 +58,7 @@ Or run automation:
 
 ```bash
 relaypilot update
-relaypilot update --version v0.1.11 --restart-services
+relaypilot update --version v0.1.12 --restart-services
 ```
 
 This updates the entrypoint and Go core. If the requested version is already

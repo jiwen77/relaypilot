@@ -207,7 +207,7 @@ Automation:
 
 ```bash
 relaypilot update
-relaypilot update --version v0.1.11 --restart-services
+relaypilot update --version v0.1.12 --restart-services
 ```
 
 The updater checks the installed Go core version before downloading. If the
