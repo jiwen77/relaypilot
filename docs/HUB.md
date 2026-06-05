@@ -490,13 +490,18 @@ relaypilot hub-alert-callback 'rp:rm:<token>'
 
 ## Register Hub commands with Telegram
 
-Configure Telegram only on the Hub:
+Configure Telegram only on the Hub. The normal menu flow is one binding step:
 
-```bash
-relaypilot bot setup
-TG_DRY_RUN=1 relaypilot bot register --hub
-relaypilot bot register --hub
+```text
+relaypilot
+1) Hub 模式
+5) Telegram
+1) 绑定/修改 Telegram
 ```
+
+Binding writes the bot config, installs/updates the Hub Telegram daemon,
+registers `/relaypilot`, and restarts the service. Manual command registration
+remains available under Telegram advanced operations.
 
 Hub command set:
 
@@ -519,7 +524,7 @@ relaypilot hub-dispatch "/topology"
 relaypilot hub-dispatch "/status all"
 relaypilot hub-dispatch "/endpoints transit"
 relaypilot hub-dispatch "/show_endpoint landing-hk hk"
-relaypilot hub-dispatch "/update transit v0.1.10"
+relaypilot hub-dispatch "/update transit v0.1.11"
 relaypilot hub-tasks
 relaypilot hub-recover-tasks
 relaypilot hub-results

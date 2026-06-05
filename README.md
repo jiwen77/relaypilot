@@ -172,17 +172,18 @@ needs to be copied by hand.
 
 ### 5. Bind Telegram on the Hub
 
-Only the Hub should receive Telegram updates:
+Only the Hub should receive Telegram updates. Bind it from the Hub menu:
 
-```bash
-relaypilot bot setup
-TG_DRY_RUN=1 relaypilot bot register --hub
-relaypilot bot register --hub
-relaypilot install-bot-service
+```text
+relaypilot
+1) Hub 模式
+5) Telegram
+1) 绑定/修改 Telegram
 ```
 
-After binding, send `/relaypilot` to open the panel. The registered command menu
-contains only:
+Binding writes the bot config, installs/updates the Telegram daemon, registers
+`/relaypilot`, and restarts the service. After binding, send `/relaypilot` to
+open the panel. The registered command menu contains only:
 
 ```text
 /relaypilot
@@ -206,7 +207,7 @@ Automation:
 
 ```bash
 relaypilot update
-relaypilot update --version v0.1.10 --restart-services
+relaypilot update --version v0.1.11 --restart-services
 ```
 
 The updater checks the installed Go core version before downloading. If the

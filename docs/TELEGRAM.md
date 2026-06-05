@@ -56,20 +56,18 @@ TG_DRY_RUN=1 relaypilot bot register
 relaypilot bot register
 ```
 
-For Hub mode, register the Hub command set instead:
+For Hub mode, bind Telegram from the Hub menu instead:
 
-```bash
-TG_DRY_RUN=1 relaypilot bot register --hub
-relaypilot bot register --hub
+```text
+relaypilot
+1) Hub 模式
+5) Telegram
+1) 绑定/修改 Telegram
 ```
 
-Then install the bounded Hub Telegram daemon:
-
-```bash
-relaypilot install-bot-service
-```
-
-After binding Telegram on the Hub, use the local menu to verify delivery:
+Binding writes the bot config, installs/updates the bounded Hub Telegram daemon,
+registers `/relaypilot`, and restarts the service. Use the local menu to verify
+delivery:
 
 ```text
 RelayPilot -> Hub 模式 -> Telegram -> 发送测试
@@ -132,8 +130,8 @@ Short update commands default to `latest` and restart the target service. You
 can still pin a version or defer restart:
 
 ```text
-/relaypilot_upall v0.1.10
-/relaypilot_upall v0.1.10 --no-restart
+/relaypilot_upall v0.1.11
+/relaypilot_upall v0.1.11 --no-restart
 ```
 
 Use an explicit tag for normal production operations. `latest` is convenient for

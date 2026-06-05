@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.1.11 - 2026-06-06
+
+- Collapse Hub Telegram setup into one binding flow that configures the bot, installs the daemon, registers `/relaypilot`, and restarts the service.
+- Move Telegram service and command internals out of the Hub Telegram main menu and into advanced operations.
+
 ## 0.1.10 - 2026-06-05
 
 - Add update version checks so RelayPilot skips same-version updates by default and uses `--force` for intentional reinstall.

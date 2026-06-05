@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="${RELAYPILOT_VERSION:-0.1.10}"
+VERSION="${RELAYPILOT_VERSION:-0.1.11}"
 REPO="${REPO:-jiwen77/relaypilot}"
 RAW_REF="${RAW_REF:-main}"
 RAW_BASE="${RAW_BASE:-https://github.com/${REPO}/raw/${RAW_REF}}"
@@ -237,8 +237,8 @@ Usage:
   bash relaypilot.sh bot register
   bash relaypilot.sh install
   bash relaypilot.sh update
-  bash relaypilot.sh update --version v0.1.10 --restart-services
-  bash relaypilot.sh update --version v0.1.10 --force
+  bash relaypilot.sh update --version v0.1.11 --restart-services
+  bash relaypilot.sh update --version v0.1.11 --force
   bash relaypilot.sh leave-hub  # remove Agent service/Hub credentials, keep Reality/SS/sing-box
   bash relaypilot.sh uninstall --dry-run
   bash relaypilot.sh uninstall --yes
@@ -1989,25 +1989,11 @@ install_tg_hub_service() {
 
 hub_telegram_quick_setup() {
   require_root
-  if ! confirm "配置 Telegram 状态面板" n; then
+  if ! confirm "绑定 Telegram 并启用面板" n; then
     return 0
   fi
-  if ! tg_setup; then
-    warn "Telegram 配置未完成。"
-    return 0
-  fi
-  if FORCE_SERVICE_FILE=1 install_tg_hub_service; then
-    info "Telegram 服务已安装：${TG_SERVICE_NAME}"
-  else
-    warn "Telegram 服务安装失败。"
-  fi
-  if ! tg_register_hub_commands; then
-    warn "Telegram 命令注册失败，可稍后在 Hub → Telegram 中重试。"
-  fi
-  if confirm "启动 Telegram 服务" y; then
-    if ! service_action "$TG_SERVICE_NAME" restart; then
-      warn "${TG_SERVICE_NAME} 启动失败，请查看日志。"
-    fi
+  if ! hub_telegram_setup; then
+    warn "Telegram 面板未启用，可稍后在 Hub → Telegram 中重试。"
   fi
 }
 
@@ -2076,6 +2062,31 @@ tg_register_hub_commands() {
   local dry_arg=()
   [[ "${TG_DRY_RUN:-}" == "1" ]] && dry_arg+=(--dry-run)
   core_cmd tg-register-commands --hub --state-dir "$STATE_DIR" "${dry_arg[@]}"
+}
+
+hub_telegram_setup() {
+  require_root
+  local registered=0
+  tg_setup || return 1
+  if FORCE_SERVICE_FILE=1 install_tg_hub_service; then
+    info "Telegram 服务已安装/更新：${TG_SERVICE_NAME}"
+  else
+    warn "Telegram 服务安装失败。"
+    return 1
+  fi
+  if tg_register_hub_commands; then
+    info "Telegram 面板命令已注册：/relaypilot"
+    registered=1
+  else
+    warn "Telegram 命令注册失败，可稍后在高级操作中重试。"
+  fi
+  if service_action "$TG_SERVICE_NAME" restart; then
+    info "Telegram 面板已启用。"
+  else
+    warn "${TG_SERVICE_NAME} 重启失败，请查看日志。"
+    return 1
+  fi
+  [[ "$registered" == "1" ]]
 }
 
 detect_public_ip() {
@@ -2753,19 +2764,38 @@ hub_telegram_menu() {
   require_root
   while true; do
     menu_title "Telegram"
-    menu_item 1 "配置 bot"
-    menu_item 2 "安装服务"
-    menu_item 3 "注册命令"
-    menu_item 4 "命令列表"
-    menu_item 5 "发送测试"
+    menu_item 1 "绑定/修改 Telegram"
+    menu_item 2 "发送测试"
+    menu_item 3 "高级操作"
+    menu_back
+    menu_prompt choice "0-3"
+    case "${choice:-}" in
+      1) menu_action hub_telegram_setup ;;
+      2) menu_action tg_send ;;
+      3) hub_telegram_advanced_menu ;;
+      0) return 0 ;;
+      *) menu_invalid_choice ;;
+    esac
+  done
+}
+
+hub_telegram_advanced_menu() {
+  require_root
+  while true; do
+    menu_title "Telegram 高级操作"
+    menu_item 1 "安装/更新服务"
+    menu_item 2 "注册 /relaypilot"
+    menu_item 3 "命令列表"
+    menu_item 4 "删除远端命令"
+    menu_item 5 "配置状态"
     menu_back
     menu_prompt choice "0-5"
     case "${choice:-}" in
-      1) menu_action tg_setup ;;
-      2) menu_action install_tg_hub_service ;;
-      3) menu_action tg_register_hub_commands ;;
-      4) menu_action tg_commands --hub ;;
-      5) menu_action tg_send ;;
+      1) menu_action install_tg_hub_service ;;
+      2) menu_action tg_register_hub_commands ;;
+      3) menu_action tg_commands --hub ;;
+      4) menu_action tg_delete_commands ;;
+      5) menu_action tg_status ;;
       0) return 0 ;;
       *) menu_invalid_choice ;;
     esac
