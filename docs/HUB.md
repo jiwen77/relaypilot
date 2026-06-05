@@ -130,7 +130,7 @@ display the selected IP mode (`静态` or `动态`), the reported/observed
 IP, and a cached GeoIP `位置` when available. These fields are for visibility
 and future automation only; changing static/dynamic mode does not rewrite
 existing Reality, Shadowsocks, or WireGuard configuration. Human-facing panels
-mask IP display to the first half, for example `203.0.x.x`; stored state keeps
+mask IP display to the first half, for example `203.0.*.*`; stored state keeps
 the original value for routing and diagnostics. GeoIP uses the configured
 third-party lookup endpoint and can be disabled with `RELAYPILOT_GEOIP=0`.
 

@@ -94,7 +94,7 @@ related nodes, recent operations, and confirmed retirement actions. Per-node
 updates stay in `更新中心` so update flow remains centralized. When a
 public node IP is available, Hub caches a low-frequency GeoIP lookup and shows
 it as `位置 美国·洛杉矶` or `位置 日本·东京` in the node list. Human-facing panels
-mask IP display to the first half, for example `203.0.x.x`. GeoIP uses the
+mask IP display to the first half, for example `203.0.*.*`. GeoIP uses the
 configured third-party lookup endpoint and can be disabled with
 `RELAYPILOT_GEOIP=0`. The update center uses a button wizard: choose Hub or
 Agent, choose a range/node, then confirm.

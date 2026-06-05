@@ -719,7 +719,7 @@ func maskIPForDisplay(ip string) string {
 		return ip
 	}
 	if v4 := parsed.To4(); v4 != nil {
-		return fmt.Sprintf("%d.%d.x.x", v4[0], v4[1])
+		return fmt.Sprintf("%d.%d.*.*", v4[0], v4[1])
 	}
 	v6 := parsed.To16()
 	if v6 == nil {

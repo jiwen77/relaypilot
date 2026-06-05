@@ -2249,6 +2249,19 @@ func TestTelegramHubUpdateDispatchAndAPIEncoding(t *testing.T) {
 		"topology": obj{"endpoints": []any{
 			obj{"name": "hk", "tag": "landing-hk-ss", "server": "203.0.113.20", "server_port": 443},
 		}},
+	}, "172.81.102.137": obj{
+		"kind":      agentRegistrationKind,
+		"version":   version,
+		"id":        "172.81.102.137",
+		"role":      "transit",
+		"name":      "IP Named Transit",
+		"transport": "poll",
+		"last_seen": nowTs,
+		"sync_at":   nowTs - 60,
+		"network": obj{
+			"ip_mode":     "static",
+			"observed_ip": "172.81.102.137",
+		},
 	}}
 	if err := saveHubRegistry(state, reg); err != nil {
 		t.Fatal(err)
@@ -2296,7 +2309,7 @@ func TestTelegramHubUpdateDispatchAndAPIEncoding(t *testing.T) {
 	}
 	nodeDetail := handleTelegramHubReply(state, obj{"update_id": 18, "callback_query": obj{"data": "rp:agent:transit-hk", "message": obj{"chat": obj{"id": "999"}}}})
 	nodeDetailMarkup, _ := json.Marshal(nodeDetail.ReplyMarkup)
-	for _, want := range []string{"ID：", "transit-hk", "角色：中转", "状态：在线", "网络：动态", "IP 8.8.x.x", "位置 中国香港", "详情：上次刷新"} {
+	for _, want := range []string{"ID：", "transit-hk", "角色：中转", "状态：在线", "网络：动态", "IP 8.8.*.*", "位置 中国香港", "详情：上次刷新"} {
 		if !strings.Contains(nodeDetail.Text, want) {
 			t.Fatalf("node detail missing %q: %#v", want, nodeDetail)
 		}
@@ -2518,6 +2531,43 @@ func TestTelegramHubUpdateDispatchAndAPIEncoding(t *testing.T) {
 	}
 	if asObj(drySend["payload"])["text"] != "hello" {
 		t.Fatalf("dry send = %#v", drySend)
+	}
+	ipPayload, err := telegramAPICall(state, "sendMessage", obj{
+		"chat_id": "123",
+		"text":    "node 172.81.102.137",
+		"reply_markup": tgKeyboard([]any{
+			tgButton("inspect 172.81.102.137", "rp:agent:172.81.102.137"),
+		}),
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ipWire, _ := json.Marshal(asObj(ipPayload["payload"]))
+	if bytes.Contains(ipWire, []byte("172.81.102.137")) {
+		t.Fatalf("telegram wire payload leaked raw IPv4: %s", ipWire)
+	}
+	if !bytes.Contains(ipWire, []byte("172.81.*.*")) || !bytes.Contains(ipWire, []byte("tgcb:")) {
+		t.Fatalf("telegram wire payload should mask text and tokenize callback data: %s", ipWire)
+	}
+	var replyMarkup obj
+	if err := json.Unmarshal([]byte(str(asObj(ipPayload["payload"])["reply_markup"])), &replyMarkup); err != nil {
+		t.Fatal(err)
+	}
+	token := str(asObj(asList(asList(replyMarkup["inline_keyboard"])[0])[0])["callback_data"])
+	if !strings.HasPrefix(token, "tgcb:") {
+		t.Fatalf("callback data should be tokenized: %s", token)
+	}
+	if got := resolveTelegramCallbackData(state, token); got != "rp:agent:172.81.102.137" {
+		t.Fatalf("callback token should resolve locally, got %q", got)
+	}
+	tokenReply := handleTelegramHubReply(state, obj{"update_id": 19, "callback_query": obj{"data": token, "message": obj{"chat": obj{"id": "999"}}}})
+	if !strings.Contains(tokenReply.Text, "IP Named Transit") {
+		t.Fatalf("token callback should resolve locally: %#v", tokenReply)
+	}
+	tokenWire := telegramWirePayload(sanitizeTelegramPayload(obj{"_state_dir": state}, obj{"text": tokenReply.Text, "reply_markup": tokenReply.ReplyMarkup}))
+	tokenWireJSON, _ := json.Marshal(tokenWire)
+	if bytes.Contains(tokenWireJSON, []byte("172.81.102.137")) || !bytes.Contains(tokenWireJSON, []byte("172.81.*.*")) || !bytes.Contains(tokenWireJSON, []byte("tgcb:")) {
+		t.Fatalf("resolved token reply should be sanitized before Telegram send: %s", tokenWireJSON)
 	}
 
 	var gotPath string
@@ -3330,9 +3380,9 @@ func TestFormatAgentsTextShowsCardRows(t *testing.T) {
 	for _, want := range []string{
 		"📡 节点列表：2",
 		"🟢 🛬 landing-jp · 落地 · JP Landing",
-		"   静态 · IP 203.0.x.x · 位置 日本·东京 · 上次刷新 3 分钟前",
+		"   静态 · IP 203.0.*.* · 位置 日本·东京 · 上次刷新 3 分钟前",
 		"🟢 🛫 transit-us · 中转 · US Transit",
-		"   动态 · IP 8.8.x.x · 位置 美国·洛杉矶 · 上次刷新 5 分钟前",
+		"   动态 · IP 8.8.*.* · 位置 美国·洛杉矶 · 上次刷新 5 分钟前",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("missing %q in:\n%s", want, text)

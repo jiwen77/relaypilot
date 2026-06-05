@@ -234,7 +234,7 @@ choose the range/node, then confirm.
 - Endpoint passwords are not printed in Telegram replies; task records keep
   summaries and only protected task payloads carry full endpoint material.
 - Human-facing panels mask public IP display to the first half, for example
-  `203.0.x.x`. Stored state keeps original values for routing and diagnostics.
+  `203.0.*.*`. Stored state keeps original values for routing and diagnostics.
 - Hub-side GeoIP enrichment is cached and optional. Disable third-party lookups
   with `RELAYPILOT_GEOIP=0`, or point `RELAYPILOT_GEOIP_URL` at your own
   lookup service.

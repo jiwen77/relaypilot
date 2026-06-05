@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -17,6 +19,20 @@ import (
 )
 
 func telegramConfigPath(stateDir string) string { return filepath.Join(stateDir, telegramConfigName) }
+func telegramCallbackMapPath(stateDir string) string {
+	return filepath.Join(stateDir, "telegram-callback-map.json")
+}
+
+var telegramIPv4RE = regexp.MustCompile(`(^|[^0-9])([0-9]{1,3}\.[0-9]{1,3})\.[0-9]{1,3}\.[0-9]{1,3}([^0-9]|$)`)
+var telegramBareIPv4RE = regexp.MustCompile(`(?m)(^|[^0-9])(?:[0-9]{1,3}\.){3}[0-9]{1,3}([^0-9]|$)`)
+
+func maskTelegramIPs(text string) string {
+	return telegramIPv4RE.ReplaceAllString(text, `${1}${2}.*.*${3}`)
+}
+
+func containsTelegramIPv4(text string) bool {
+	return telegramBareIPv4RE.MatchString(text)
+}
 
 func maskSecret(value string, keep int) string {
 	if value == "" {
@@ -73,6 +89,7 @@ func loadTelegramConfig(stateDir string) (obj, error) {
 	if enabled, ok := cfg["enabled"].(bool); ok && !enabled {
 		return nil, errors.New("telegram config is disabled")
 	}
+	cfg["_state_dir"] = stateDir
 	return cfg, nil
 }
 
@@ -107,6 +124,7 @@ func telegramAPIRequest(cfg obj, method string, payload obj, timeout time.Durati
 	if token == "" {
 		return nil, errors.New("telegram bot token is required")
 	}
+	payload = sanitizeTelegramPayload(cfg, payload)
 	form := url.Values{}
 	for key, value := range payload {
 		if value == nil {
@@ -232,6 +250,101 @@ func telegramWirePayload(payload obj) obj {
 	return out
 }
 
+func storeTelegramCallbackData(stateDir, data string) string {
+	data = strings.TrimSpace(data)
+	if data == "" || strings.HasPrefix(data, "tgcb:") || !containsTelegramIPv4(data) {
+		return data
+	}
+	if stateDir == "" {
+		return maskTelegramIPs(data)
+	}
+	sum := sha256.Sum256([]byte(data))
+	token := "tgcb:" + fmt.Sprintf("%x", sum)[:24]
+	path := telegramCallbackMapPath(stateDir)
+	callbacks := obj{}
+	if existing, err := loadJSON(path); err == nil {
+		callbacks = existing
+	} else if !errors.Is(err, os.ErrNotExist) {
+		callbacks = obj{}
+	}
+	callbacks[token] = obj{"v": data, "ts": now()}
+	_ = writeJSON(path, callbacks, 0o600)
+	return token
+}
+
+func resolveTelegramCallbackData(stateDir, data string) string {
+	if !strings.HasPrefix(data, "tgcb:") || stateDir == "" {
+		return data
+	}
+	callbacks, err := loadJSON(telegramCallbackMapPath(stateDir))
+	if err != nil {
+		return data
+	}
+	rec := callbacks[data]
+	if m := asObj(rec); len(m) > 0 {
+		if value := str(m["v"]); value != "" {
+			return value
+		}
+	}
+	if value := str(rec); value != "" {
+		return value
+	}
+	return data
+}
+
+func sanitizeTelegramPayload(cfg obj, payload obj) obj {
+	out := obj{}
+	for key, value := range payload {
+		out[key] = sanitizeTelegramValue(cfg, key, value)
+	}
+	return out
+}
+
+func sanitizeTelegramValue(cfg obj, key string, value any) any {
+	switch v := value.(type) {
+	case obj:
+		out := obj{}
+		for childKey, childValue := range v {
+			out[childKey] = sanitizeTelegramValue(cfg, childKey, childValue)
+		}
+		return out
+	case []any:
+		out := make([]any, 0, len(v))
+		for _, childValue := range v {
+			out = append(out, sanitizeTelegramValue(cfg, "", childValue))
+		}
+		return out
+	case []obj:
+		out := make([]obj, 0, len(v))
+		for _, childValue := range v {
+			out = append(out, sanitizeTelegramValue(cfg, "", childValue).(obj))
+		}
+		return out
+	case string:
+		switch key {
+		case "text", "caption":
+			return maskTelegramIPs(v)
+		case "url":
+			return maskTelegramIPs(v)
+		case "callback_data":
+			return storeTelegramCallbackData(str(cfg["_state_dir"]), v)
+		case "reply_markup":
+			var decoded any
+			if err := json.Unmarshal([]byte(v), &decoded); err == nil {
+				wire, err := json.Marshal(sanitizeTelegramValue(cfg, key, decoded))
+				if err == nil {
+					return string(wire)
+				}
+			}
+			return maskTelegramIPs(v)
+		default:
+			return v
+		}
+	default:
+		return value
+	}
+}
+
 func telegramAPICall(stateDir, method string, payload obj, dryRun bool) (obj, error) {
 	cfg, err := loadTelegramConfig(stateDir)
 	if err != nil {
@@ -242,6 +355,7 @@ func telegramAPICall(stateDir, method string, payload obj, dryRun bool) (obj, er
 	}
 	urlText := strings.TrimRight(str(cfg["api_base"]), "/") + "/bot" + str(cfg["bot_token"]) + "/" + method
 	if dryRun {
+		payload = sanitizeTelegramPayload(cfg, payload)
 		return obj{
 			"dry_run": true,
 			"method":  method,
@@ -1275,7 +1389,7 @@ func handleTelegramHubUpdate(stateDir string, update obj) string {
 
 func handleTelegramHubReply(stateDir string, update obj) telegramReply {
 	if cb := asObj(update["callback_query"]); len(cb) > 0 {
-		data := str(cb["data"])
+		data := resolveTelegramCallbackData(stateDir, str(cb["data"]))
 		if data == "" {
 			return telegramReply{}
 		}

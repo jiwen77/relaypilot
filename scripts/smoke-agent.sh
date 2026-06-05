@@ -514,6 +514,13 @@ INSTALL_DIR="$ROOT/update-dir" \
 BIN_PATH="$ROOT/bin/relaypilot-updated" \
 RELAYPILOT_NO_ROOT=1 \
 bash ./relaypilot.sh update --no-restart-services > "$ROOT/update-latest-skip.out" 2> "$ROOT/update-latest-skip.err"
+printf '3\n6\n0\n0\n' | RAW_BASE="file://$ROOT/raw" \
+RELEASE_BASE="file://$ROOT/release" \
+RELAYPILOT_REMOTE_VERSION="v-local" \
+INSTALL_DIR="$ROOT/update-dir" \
+BIN_PATH="$ROOT/bin/relaypilot-updated" \
+RELAYPILOT_NO_ROOT=1 \
+bash ./relaypilot.sh > "$ROOT/update-menu-skip.out" 2> "$ROOT/update-menu-skip.err"
 RAW_BASE="file://$ROOT/raw" \
 RELEASE_BASE="file://$ROOT/release" \
 INSTALL_DIR="$ROOT/update-dir" \
@@ -608,6 +615,8 @@ grep -q '已是最新版本：v-local' "$ROOT/update-skip.out"
 ! grep -q '下载 Go core' "$ROOT/update-skip.out"
 grep -q '已是最新版本：v-local' "$ROOT/update-latest-skip.out"
 ! grep -q '下载 Go core' "$ROOT/update-latest-skip.out"
+grep -q '已是最新版本：v-local' "$ROOT/update-menu-skip.out"
+! grep -q '已更新，正在重新打开新版面板' "$ROOT/update-menu-skip.out"
 grep -q '下载 Go core' "$ROOT/update-force.out"
 [[ -x "$ROOT/update-dir/relaypilot.sh" ]]
 [[ -x "$ROOT/update-dir/bin/relaypilot" ]]

@@ -999,6 +999,7 @@ install_self() {
 self_update() {
   require_root
   local version="${UPDATE_VERSION:-latest}" restart_services="${RELAYPILOT_UPDATE_RESTART:-ask}" raw_base="$RAW_BASE" release_base="$RELEASE_BASE" force=0
+  RELAYPILOT_UPDATE_NOOP=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --version) version="$2"; shift 2 ;;
@@ -1020,6 +1021,7 @@ self_update() {
   current_version="$(installed_core_version || true)"
   if [[ "$force" != "1" && -n "$target_version" && -n "$current_version" ]]; then
     if [[ "$(normalize_version "$target_version")" == "$(normalize_version "$current_version")" ]]; then
+      RELAYPILOT_UPDATE_NOOP=1
       info "已是最新版本：$target_version"
       info "如需重新安装当前版本，请添加 --force。"
       return 0
@@ -2706,6 +2708,10 @@ menu_update_and_reload() {
   set -e
   if (( rc != 0 )); then
     warn "更新未完成（退出码 ${rc}）。"
+    menu_pause
+    return 0
+  fi
+  if [[ "${RELAYPILOT_UPDATE_NOOP:-0}" == "1" ]]; then
     menu_pause
     return 0
   fi

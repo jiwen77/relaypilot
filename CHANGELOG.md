@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.1.13 - 2026-06-06
+
+- Mask every Telegram-bound IPv4 to the first two octets with `*.*`, including message text, inline button labels, URL fields, dry-run payloads, and standalone Hub bot sends.
+- Tokenize Telegram `callback_data` values that contain full IPv4 addresses and resolve them locally when callbacks return, so button actions keep working without exposing raw IPs to Telegram.
+- Keep the interactive self-update menu from reopening when the requested version is already installed and no update was performed.
+
 ## 0.1.12 - 2026-06-06
 
 - Replace Hub Telegram advanced operations with a single repair action that reinstalls the daemon, registers `/relaypilot`, and restarts the service.
@@ -28,7 +34,7 @@
 - Simplify Telegram panel copy and button labels, remove utility/external buttons from the main operation panel, and show update targets on confirmation.
 - Add clickable Telegram node rows with single-node detail, refresh, doctor, related-node, recent-operation, and confirmed retirement actions.
 - Add cached Hub-side GeoIP location enrichment for node lists, shown as fields such as `美国·洛杉矶` or `日本·东京` when a public node IP is available.
-- Mask human-facing IP display to the first half, for example `203.0.x.x`.
+- Mask human-facing IP display to the first half, for example `203.0.*.*`.
 - Document GeoIP privacy behavior and the `RELAYPILOT_GEOIP=0` opt-out.
 - Add mtime-invalidated in-process caches for Hub agent/task reads and topology relation views to avoid rebuilding unchanged Telegram/Hub panels.
 - Add passive max-age expiry for Hub view caches: 10s for agent/topology views and 5s for task views.
