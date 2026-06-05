@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.1.10 - 2026-06-05
+
+- Add update version checks so RelayPilot skips same-version updates by default and uses `--force` for intentional reinstall.
+
 ## 0.1.9 - 2026-06-05
 
 - Highlight only the default character in interactive yes/no prompts, so `[Y/n]` no longer makes the non-default choice look selected.

@@ -132,8 +132,8 @@ Short update commands default to `latest` and restart the target service. You
 can still pin a version or defer restart:
 
 ```text
-/relaypilot_upall v0.1.9
-/relaypilot_upall v0.1.9 --no-restart
+/relaypilot_upall v0.1.10
+/relaypilot_upall v0.1.10 --no-restart
 ```
 
 Use an explicit tag for normal production operations. `latest` is convenient for

@@ -206,13 +206,16 @@ Automation:
 
 ```bash
 relaypilot update
-relaypilot update --version v0.1.9 --restart-services
+relaypilot update --version v0.1.10 --restart-services
 ```
 
-The updater replaces the entrypoint and Go core. Interactive update defaults to
-restarting installed RelayPilot services so Hub/Agent/Bot daemons use the new
-version immediately. Use `--no-restart-services` only when you intentionally
-want running services to keep the old process until the next restart.
+The updater checks the installed Go core version before downloading. If the
+target version is already installed, it skips the update by default; use
+`--force` when you intentionally want to reinstall the same version. Interactive
+update defaults to restarting installed RelayPilot services so Hub/Agent/Bot
+daemons use the new version immediately. Use `--no-restart-services` only when
+you intentionally want running services to keep the old process until the next
+restart.
 
 Telegram update operations are centralized in `更新中心`: choose Hub or Agent,
 choose the range/node, then confirm.

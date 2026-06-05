@@ -28,6 +28,16 @@ func writeExecutable(t *testing.T, path, content string) {
 	}
 }
 
+func TestSelfUpdateResultTextReportsAlreadyCurrent(t *testing.T) {
+	text := selfUpdateResultText("latest", "==> 已是最新版本：v0.1.10\n==> 如需重新安装当前版本，请添加 --force。\n")
+	if !strings.Contains(text, "RelayPilot already at latest") {
+		t.Fatalf("skip text should not claim update: %s", text)
+	}
+	if strings.Contains(text, "RelayPilot updated to") {
+		t.Fatalf("skip text should not use updated wording: %s", text)
+	}
+}
+
 func TestHubAgentPollSignedFlow(t *testing.T) {
 	root := t.TempDir()
 	hubState := filepath.Join(root, "hub")

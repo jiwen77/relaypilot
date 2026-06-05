@@ -58,13 +58,15 @@ Or run automation:
 
 ```bash
 relaypilot update
-relaypilot update --version v0.1.9 --restart-services
+relaypilot update --version v0.1.10 --restart-services
 ```
 
-This updates the entrypoint and Go core. The interactive updater defaults to
-restarting installed RelayPilot services so already-running Hub/Agent/Bot
-daemons use the new version immediately. Use `--no-restart-services` to defer
-service restart intentionally.
+This updates the entrypoint and Go core. If the requested version is already
+installed, RelayPilot skips the download by default; add `--force` to reinstall
+the same version. The interactive updater defaults to restarting installed
+RelayPilot services so already-running Hub/Agent/Bot daemons use the new
+version immediately. Use `--no-restart-services` to defer service restart
+intentionally.
 
 ## Agent data-plane setup
 

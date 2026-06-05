@@ -487,7 +487,7 @@ grep -q 'CPUQuota=25%' "$ROOT/systemd/relay-smoke-tg.service"
 
 mkdir -p "$ROOT/release/v-local" "$ROOT/raw"
 cp ./relaypilot.sh "$ROOT/raw/relaypilot.sh"
-cp "$ROOT/bin/relaypilot" "$ROOT/release/v-local/relaypilot_linux_amd64"
+go build -trimpath -ldflags "-X main.buildVersion=v-local" -o "$ROOT/release/v-local/relaypilot_linux_amd64" ./cmd/relaypilot
 (cd "$ROOT/release/v-local" && sha256sum relaypilot_linux_amd64 > relaypilot_linux_amd64.sha256)
 RAW_BASE="file://$ROOT/raw" \
 RELEASE_BASE="file://$ROOT/release" \
@@ -495,6 +495,25 @@ INSTALL_DIR="$ROOT/update-dir" \
 BIN_PATH="$ROOT/bin/relaypilot-updated" \
 RELAYPILOT_NO_ROOT=1 \
 bash ./relaypilot.sh update --version v-local --no-restart-services > "$ROOT/update.out" 2> "$ROOT/update.err"
+RAW_BASE="file://$ROOT/raw" \
+RELEASE_BASE="file://$ROOT/release" \
+INSTALL_DIR="$ROOT/update-dir" \
+BIN_PATH="$ROOT/bin/relaypilot-updated" \
+RELAYPILOT_NO_ROOT=1 \
+bash ./relaypilot.sh update --version v-local --no-restart-services > "$ROOT/update-skip.out" 2> "$ROOT/update-skip.err"
+RAW_BASE="file://$ROOT/raw" \
+RELEASE_BASE="file://$ROOT/release" \
+RELAYPILOT_REMOTE_VERSION="v-local" \
+INSTALL_DIR="$ROOT/update-dir" \
+BIN_PATH="$ROOT/bin/relaypilot-updated" \
+RELAYPILOT_NO_ROOT=1 \
+bash ./relaypilot.sh update --no-restart-services > "$ROOT/update-latest-skip.out" 2> "$ROOT/update-latest-skip.err"
+RAW_BASE="file://$ROOT/raw" \
+RELEASE_BASE="file://$ROOT/release" \
+INSTALL_DIR="$ROOT/update-dir" \
+BIN_PATH="$ROOT/bin/relaypilot-updated" \
+RELAYPILOT_NO_ROOT=1 \
+bash ./relaypilot.sh update --version v-local --force --no-restart-services > "$ROOT/update-force.out" 2> "$ROOT/update-force.err"
 mkdir -p "$ROOT/fake-update-bin"
 cat > "$ROOT/fake-update-bin/systemctl" <<'EOF_SYSTEMCTL'
 #!/usr/bin/env bash
@@ -578,6 +597,12 @@ RELAYPILOT_NO_ROOT=1 \
 bash ./relaypilot.sh install > "$ROOT/install.out" 2> "$ROOT/install.err"
 
 grep -q '已更新 RelayPilot' "$ROOT/update.out"
+grep -q 'RelayPilot Go core v-local' "$ROOT/update.out"
+grep -q '已是最新版本：v-local' "$ROOT/update-skip.out"
+! grep -q '下载 Go core' "$ROOT/update-skip.out"
+grep -q '已是最新版本：v-local' "$ROOT/update-latest-skip.out"
+! grep -q '下载 Go core' "$ROOT/update-latest-skip.out"
+grep -q '下载 Go core' "$ROOT/update-force.out"
 [[ -x "$ROOT/update-dir/relaypilot.sh" ]]
 [[ -x "$ROOT/update-dir/bin/relaypilot" ]]
 [[ -L "$ROOT/bin/relaypilot-updated" || -x "$ROOT/bin/relaypilot-updated" ]]

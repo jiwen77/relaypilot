@@ -558,10 +558,7 @@ func executeSelfUpdateTask(task obj) obj {
 	if err != nil {
 		return obj{"success": false, "command": "self_update", "version": updateVersion, "error": err.Error(), "text": lastNonEmptyLines(out, 8)}
 	}
-	text := "RelayPilot updated to " + updateVersion
-	if trimmed := lastNonEmptyLines(out, 4); trimmed != "" {
-		text += "\n" + trimmed
-	}
+	text := selfUpdateResultText(updateVersion, out)
 	if truthy(payload["restart_services"]) {
 		serviceName := firstNonEmpty(str(payload["service_name"]), envOrDefault("RELAYPILOT_AGENT_SERVICE_NAME", "relaypilot-agent"))
 		if err := scheduleServiceRestart([]string{serviceName}, 12); err != nil {
@@ -571,6 +568,18 @@ func executeSelfUpdateTask(task obj) obj {
 		}
 	}
 	return obj{"success": true, "command": "self_update", "version": updateVersion, "restart_services": truthy(payload["restart_services"]), "text": text}
+}
+
+func selfUpdateResultText(updateVersion, output string) string {
+	verb := "updated to"
+	if strings.Contains(output, "已是最新版本") {
+		verb = "already at"
+	}
+	text := "RelayPilot " + verb + " " + updateVersion
+	if trimmed := lastNonEmptyLines(output, 4); trimmed != "" {
+		text += "\n" + trimmed
+	}
+	return text
 }
 
 func readAgentToken(token, tokenFile string) (string, error) {

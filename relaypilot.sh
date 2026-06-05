@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="${RELAYPILOT_VERSION:-0.1.9}"
+VERSION="${RELAYPILOT_VERSION:-0.1.10}"
 REPO="${REPO:-jiwen77/relaypilot}"
 RAW_REF="${RAW_REF:-main}"
 RAW_BASE="${RAW_BASE:-https://github.com/${REPO}/raw/${RAW_REF}}"
@@ -237,7 +237,8 @@ Usage:
   bash relaypilot.sh bot register
   bash relaypilot.sh install
   bash relaypilot.sh update
-  bash relaypilot.sh update --version v0.1.9 --restart-services
+  bash relaypilot.sh update --version v0.1.10 --restart-services
+  bash relaypilot.sh update --version v0.1.10 --force
   bash relaypilot.sh leave-hub  # remove Agent service/Hub credentials, keep Reality/SS/sing-box
   bash relaypilot.sh uninstall --dry-run
   bash relaypilot.sh uninstall --yes
@@ -442,6 +443,36 @@ arch_name() {
     mipsel) arch=mipsle ;;
   esac
   printf '%s_%s' "$os" "$arch"
+}
+
+normalize_version() {
+  local value="$1"
+  value="${value#v}"
+  printf '%s' "$value"
+}
+
+installed_core_version() {
+  local core="${INSTALL_DIR}/bin/relaypilot" out
+  [[ -x "$core" ]] || return 1
+  out="$("$core" version 2>/dev/null || true)"
+  sed -nE 's/^RelayPilot Go core[[:space:]]+(.+)$/\1/p' <<<"$out" | head -n 1
+}
+
+resolve_latest_update_version() {
+  local raw_base="$1" tmp resolved=""
+  if [[ -n "${RELAYPILOT_REMOTE_VERSION:-}" ]]; then
+    printf '%s' "$RELAYPILOT_REMOTE_VERSION"
+    return 0
+  fi
+  tmp="$(mktemp -d /tmp/relaypilot-version.XXXXXX)"
+  if fetch "https://api.github.com/repos/${REPO}/releases/latest" "${tmp}/latest.json" >/dev/null 2>&1; then
+    resolved="$(sed -nE 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "${tmp}/latest.json" | head -n 1)"
+  fi
+  if [[ -z "$resolved" ]] && fetch "${raw_base}/VERSION" "${tmp}/VERSION" >/dev/null 2>&1; then
+    resolved="$(head -n 1 "${tmp}/VERSION" | tr -d '[:space:]')"
+  fi
+  rm -rf "$tmp"
+  printf '%s' "$resolved"
 }
 
 select_agent_role() {
@@ -967,7 +998,7 @@ install_self() {
 
 self_update() {
   require_root
-  local version="${UPDATE_VERSION:-latest}" restart_services="${RELAYPILOT_UPDATE_RESTART:-ask}" raw_base="$RAW_BASE" release_base="$RELEASE_BASE"
+  local version="${UPDATE_VERSION:-latest}" restart_services="${RELAYPILOT_UPDATE_RESTART:-ask}" raw_base="$RAW_BASE" release_base="$RELEASE_BASE" force=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --version) version="$2"; shift 2 ;;
@@ -975,9 +1006,25 @@ self_update() {
       --release-base) release_base="$2"; shift 2 ;;
       --restart-services) restart_services=yes; shift ;;
       --no-restart-services) restart_services=no; shift ;;
+      --force) force=1; shift ;;
       *) err "未知参数：$1"; return 1 ;;
     esac
   done
+
+  local target_version current_version
+  if [[ "$version" == "latest" ]]; then
+    target_version="$(resolve_latest_update_version "$raw_base" || true)"
+  else
+    target_version="$version"
+  fi
+  current_version="$(installed_core_version || true)"
+  if [[ "$force" != "1" && -n "$target_version" && -n "$current_version" ]]; then
+    if [[ "$(normalize_version "$target_version")" == "$(normalize_version "$current_version")" ]]; then
+      info "已是最新版本：$target_version"
+      info "如需重新安装当前版本，请添加 --force。"
+      return 0
+    fi
+  fi
 
   local platform asset url tmp script_tmp asset_tmp checksum
   platform="$(arch_name)"
