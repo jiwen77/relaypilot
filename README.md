@@ -206,7 +206,7 @@ Automation:
 
 ```bash
 relaypilot update
-relaypilot update --version v0.1.8 --restart-services
+relaypilot update --version v0.1.9 --restart-services
 ```
 
 The updater replaces the entrypoint and Go core. Interactive update defaults to

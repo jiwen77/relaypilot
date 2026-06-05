@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="${RELAYPILOT_VERSION:-0.1.8}"
+VERSION="${RELAYPILOT_VERSION:-0.1.9}"
 REPO="${REPO:-jiwen77/relaypilot}"
 RAW_REF="${RAW_REF:-main}"
 RAW_BASE="${RAW_BASE:-https://github.com/${REPO}/raw/${RAW_REF}}"
@@ -237,7 +237,7 @@ Usage:
   bash relaypilot.sh bot register
   bash relaypilot.sh install
   bash relaypilot.sh update
-  bash relaypilot.sh update --version v0.1.8 --restart-services
+  bash relaypilot.sh update --version v0.1.9 --restart-services
   bash relaypilot.sh leave-hub  # remove Agent service/Hub credentials, keep Reality/SS/sing-box
   bash relaypilot.sh uninstall --dry-run
   bash relaypilot.sh uninstall --yes
@@ -403,10 +403,12 @@ select_option() {
 
 confirm() {
   local label="$1" default="${2:-y}" value
-  local hint="Y/n"
   default="$(printf '%s' "$default" | tr '[:upper:]' '[:lower:]')"
-  [[ "$default" == "n" ]] && hint="y/N"
-  printf "%s [%s%s%s]: " "$label" "$BOLD$CYAN" "$hint" "$NC"
+  if [[ "$default" == "n" ]]; then
+    printf "%s [y/%sN%s]: " "$label" "$BOLD$CYAN" "$NC"
+  else
+    printf "%s [%sY%s/n]: " "$label" "$BOLD$CYAN" "$NC"
+  fi
   read -r value || true
   value="${value:-$default}"
   case "$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')" in

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.1.9 - 2026-06-05
+
+- Highlight only the default character in interactive yes/no prompts, so `[Y/n]` no longer makes the non-default choice look selected.
+
 ## 0.1.8 - 2026-06-05
 
 - Move Telegram Hub update operations behind panel buttons with a final confirmation step; namespaced short commands remain as manual fallback.

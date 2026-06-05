@@ -2308,8 +2308,8 @@ func compactUpdateHelp() string {
 		"/relaypilot_up landing",
 		"/relaypilot_upall",
 		"",
-		"指定版本：/relaypilot_upall v0.1.8",
-		"不重启：/relaypilot_upall v0.1.8 --no-restart",
+		"指定版本：/relaypilot_upall v0.1.9",
+		"不重启：/relaypilot_upall v0.1.9 --no-restart",
 		"建议：先单节点 canary，再 all。",
 	}, "\n")
 }

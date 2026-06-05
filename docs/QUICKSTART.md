@@ -58,7 +58,7 @@ Or run automation:
 
 ```bash
 relaypilot update
-relaypilot update --version v0.1.8 --restart-services
+relaypilot update --version v0.1.9 --restart-services
 ```
 
 This updates the entrypoint and Go core. The interactive updater defaults to

@@ -514,6 +514,18 @@ grep -q '是否重启已安装的 RelayPilot 服务以应用新版本 \[Y/n\]' "
 grep -q 'systemctl restart relaypilot-agent' "$ROOT/update-default-restart-systemctl.log"
 grep -q 'systemctl restart relaypilot-hub' "$ROOT/update-default-restart-systemctl.log"
 grep -q 'systemctl restart relaypilot-bot' "$ROOT/update-default-restart-systemctl.log"
+if command -v script >/dev/null 2>&1; then
+  printf '\n' | script -qec "RAW_BASE=file://$ROOT/raw RELEASE_BASE=file://$ROOT/release INSTALL_DIR=$ROOT/update-confirm-tty-dir BIN_PATH=$ROOT/bin/relaypilot-updated-confirm-tty RELAYPILOT_NO_ROOT=1 RELAYPILOT_FAKE_SYSTEMCTL_LOG=$ROOT/update-confirm-tty-systemctl.log PATH=$ROOT/fake-update-bin:\$PATH bash ./relaypilot.sh update --version v-local" "$ROOT/update-confirm-tty.out" >/dev/null
+  printf '\n' | script -qec "INSTALL_DIR=$ROOT/uninstall-confirm-tty-dir BIN_PATH=$ROOT/bin/relaypilot-uninstall-confirm-tty STATE_DIR=$ROOT/state RELAYPILOT_NO_ROOT=1 bash ./relaypilot.sh uninstall --dry-run" "$ROOT/uninstall-confirm-tty.out" >/dev/null
+  confirm_yes_default=$'\033[1m\033[36mY\033[0m/n'
+  confirm_yes_bad=$'\033[1m\033[36mY/n\033[0m'
+  confirm_no_default=$'y/\033[1m\033[36mN\033[0m'
+  confirm_no_bad=$'\033[1m\033[36my/N\033[0m'
+  grep -Fq "$confirm_yes_default" "$ROOT/update-confirm-tty.out"
+  ! grep -Fq "$confirm_yes_bad" "$ROOT/update-confirm-tty.out"
+  grep -Fq "$confirm_no_default" "$ROOT/uninstall-confirm-tty.out"
+  ! grep -Fq "$confirm_no_bad" "$ROOT/uninstall-confirm-tty.out"
+fi
 RAW_BASE="file://$ROOT/raw" \
 RELEASE_BASE="file://$ROOT/release" \
 VERSION="v-local" \
