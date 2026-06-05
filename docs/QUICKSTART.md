@@ -1,5 +1,7 @@
 # Quickstart
 
+RelayPilot is a secure, lightweight sing-box node orchestration tool for Hub-managed transit and landing relays.
+
 ## Install
 
 ```bash
@@ -56,7 +58,7 @@ Or run automation:
 
 ```bash
 relaypilot update
-relaypilot update --version v0.1.5 --restart-services
+relaypilot update --version v0.1.6 --restart-services
 ```
 
 This updates the entrypoint and Go core. Restart Hub/Agent/Bot services to make
@@ -81,7 +83,7 @@ Shortcut command for standalone/automation:
 bash relaypilot.sh transit-init-reality
 ```
 
-It creates or updates the VLESS Reality inbound and generates Reality key/short_id when omitted.
+It creates or updates the VLESS Reality inbound, generates Reality key/short_id when omitted, and applies data-plane changes with sing-box hot reload first.
 
 Landing machine:
 
@@ -97,6 +99,7 @@ Shortcut command:
 
 ```bash
 bash relaypilot.sh landing-install-ss
+bash relaypilot.sh landing-install-socks  # direct SOCKS5 for clients like sub2api
 ```
 
 It writes the landing Shadowsocks inbound and stores the endpoint secret under `/etc/relaypilot/endpoints/<name>.json`. With Hub linking you do not copy this endpoint by hand; the Hub fetches it from the landing agent and sends it to the transit agent as a protected task payload.

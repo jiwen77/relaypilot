@@ -334,6 +334,8 @@ service. Exact environment overrides always win:
 OpenRC units include respawn backoff only; use cgroups/container limits for hard
 CPU/RAM caps there.
 
+Data-plane apply defaults to `sing-box check` followed by service hot reload. If reload fails, RelayPilot falls back to restart and reports the final status in recent operations.
+
 ## Human-facing Telegram view
 
 Telegram replies are optimized for quick human inspection:
@@ -509,7 +511,7 @@ relaypilot hub-dispatch "/topology"
 relaypilot hub-dispatch "/status all"
 relaypilot hub-dispatch "/endpoints transit"
 relaypilot hub-dispatch "/show_endpoint landing-hk hk"
-relaypilot hub-dispatch "/update transit v0.1.5"
+relaypilot hub-dispatch "/update transit v0.1.6"
 relaypilot hub-tasks
 relaypilot hub-recover-tasks
 relaypilot hub-results

@@ -23,6 +23,26 @@ transit hosts.
 Transit renders it into a sing-box Shadowsocks outbound and binds a VLESS
 `users.name` to that outbound through `route.rules[].auth_user`.
 
+## SOCKS endpoint v1
+
+```json
+{
+  "kind": "relaypilot/landing-endpoint",
+  "version": 1,
+  "name": "la-direct",
+  "protocol": "socks",
+  "server": "198.51.100.20",
+  "server_port": 1080,
+  "socks_version": "5",
+  "username": "sub2api",
+  "password": "secret",
+  "tag": "landing-la-direct-socks"
+}
+```
+
+Transit renders it into a sing-box SOCKS outbound. Landing can also expose the
+same listener directly to client applications without a transit hop.
+
 ## Agent registration v1
 
 Agents register with the Hub through a non-secret JSON document:

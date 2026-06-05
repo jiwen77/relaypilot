@@ -18,6 +18,16 @@ import (
 	"time"
 )
 
+func writeExecutable(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestHubAgentPollSignedFlow(t *testing.T) {
 	root := t.TempDir()
 	hubState := filepath.Join(root, "hub")
@@ -79,6 +89,17 @@ func TestHubAgentPollSignedFlow(t *testing.T) {
 	if len(tasks) != 1 || tasks[0]["status"] != "done" {
 		t.Fatalf("tasks = %#v", tasks)
 	}
+	agents, err := listHubAgents(hubState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := findHubAgentByID(agents, "transit-hk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(asObj(agent["topology"])) != 0 {
+		t.Fatalf("heartbeat should not refresh topology by default: %#v", agent["topology"])
+	}
 	if got := formatHubTaskResultsText(tasks, ""); !strings.Contains(got, "transit-hk") || !strings.Contains(got, "endpoints:") {
 		t.Fatalf("bad results text: %s", got)
 	}
@@ -118,7 +139,70 @@ func TestHubAgentPollSignedFlow(t *testing.T) {
 	}
 }
 
+func TestAgentPollerReloadsEnrollmentFileWhenChanged(t *testing.T) {
+	root := t.TempDir()
+	state := filepath.Join(root, "agent")
+	conf := filepath.Join(root, "conf")
+	enrollment := filepath.Join(state, "agent-enrollment.json")
+	tokenA := filepath.Join(state, "token-a")
+	tokenB := filepath.Join(state, "token-b")
+	if err := os.MkdirAll(state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tokenA, []byte("token-a\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tokenB, []byte("token-b\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSON(enrollment, obj{
+		"hub_url":                    "https://hub-a.example",
+		"agent_id":                   "agent-a",
+		"role":                       "transit",
+		"token_file":                 tokenA,
+		"ip_mode":                    "static",
+		"public_ip_interval_seconds": 600,
+	}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	poller, stamp, err := newAgentPollerFromEnrollmentFile(enrollment, state, conf, 5, 2*time.Second, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if poller.agentID != "agent-a" || poller.token != "token-a" || poller.ipMode != "static" || poller.publicIPInterval != 600*time.Second {
+		t.Fatalf("initial poller = %#v", poller)
+	}
+	if err := writeJSON(enrollment, obj{
+		"hub_url":                    "https://hub-b.example",
+		"agent_id":                   "agent-b",
+		"role":                       "landing",
+		"token_file":                 tokenB,
+		"ip_mode":                    "dynamic",
+		"public_ip_interval_seconds": 30,
+	}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	nextMod := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(enrollment, nextMod, nextMod); err != nil {
+		t.Fatal(err)
+	}
+	poller, stamp, changed, err := reloadAgentPollerFromEnrollmentFileIfChanged(enrollment, stamp, poller, state, conf, 5, 2*time.Second, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("expected enrollment reload")
+	}
+	if stamp.Size <= 0 {
+		t.Fatalf("stamp not updated: %#v", stamp)
+	}
+	if poller.agentID != "agent-b" || poller.token != "token-b" || poller.role != "landing" || poller.ipMode != "dynamic" || poller.publicIPInterval != 30*time.Second {
+		t.Fatalf("reloaded poller = %#v", poller)
+	}
+}
+
 func TestHubLinkTransitLandingQueuesBindEndpointTask(t *testing.T) {
+	t.Setenv("RELAYPILOT_DISABLE_DATAPLANE_APPLY", "1")
 	root := t.TempDir()
 	hubState := filepath.Join(root, "hub")
 	landingState := filepath.Join(root, "landing")
@@ -263,7 +347,589 @@ func TestHubLinkTransitLandingQueuesBindEndpointTask(t *testing.T) {
 	}
 }
 
+func TestHubProbeLinkQueuesSingleLowResourceTask(t *testing.T) {
+	root := t.TempDir()
+	state := filepath.Join(root, "hub")
+	reg := defaultHubRegistry()
+	reg["agents"] = obj{
+		"transit-la": obj{
+			"kind":      agentRegistrationKind,
+			"version":   version,
+			"id":        "transit-la",
+			"role":      "transit",
+			"name":      "LA Transit",
+			"transport": "poll",
+			"topology": obj{"links": []any{
+				obj{
+					"auth_user":     "jp",
+					"endpoint_name": "jp",
+					"outbound_tag":  "landing-jp-ss",
+					"server":        "127.0.0.1",
+					"server_port":   2443,
+				},
+			}},
+		},
+		"landing-jp": obj{
+			"kind":      agentRegistrationKind,
+			"version":   version,
+			"id":        "landing-jp",
+			"role":      "landing",
+			"name":      "JP Landing",
+			"transport": "poll",
+			"topology": obj{"endpoints": []any{
+				obj{"name": "jp", "protocol": "shadowsocks", "server": "198.51.100.20", "server_port": 2443, "tag": "landing-jp-ss"},
+			}},
+		},
+	}
+	if err := saveHubRegistry(state, reg); err != nil {
+		t.Fatal(err)
+	}
+	queued, err := hubDispatchCommand(state, "/probe transit-la landing-jp jp --timeout 30")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(queued, "链路检测") || !strings.Contains(queued, "transit-la → landing-jp") || !strings.Contains(queued, "超时：5s") || !strings.Contains(queued, "不会启动后台监控") {
+		t.Fatalf("queued = %s", queued)
+	}
+	tasks, err := listHubTasks(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 1 || str(tasks[0]["command"]) != "probe_link" || str(tasks[0]["agent_id"]) != "transit-la" {
+		t.Fatalf("tasks = %#v", tasks)
+	}
+	payload := asObj(tasks[0]["payload"])
+	if str(payload["host"]) != "127.0.0.1" || int64Value(payload["port"]) != 2443 || int64Value(payload["timeout_seconds"]) != 5 {
+		t.Fatalf("payload = %#v", payload)
+	}
+	if str(payload["landing_id"]) != "landing-jp" || str(payload["endpoint_name"]) != "jp" {
+		t.Fatalf("payload link fields = %#v", payload)
+	}
+}
+
+func TestFormatHubTaskResultsUsesRecentOperationsAndFailureHints(t *testing.T) {
+	tasks := []obj{
+		{
+			"status":     "failed",
+			"agent_role": "transit",
+			"agent_id":   "transit-la",
+			"command":    "bind_endpoint",
+			"result": obj{
+				"success": false,
+				"error":   "sing-box check failed: listen tcp :443: bind: address already in use",
+			},
+		},
+	}
+	text := formatHubTaskResultsText(tasks, "")
+	if !strings.Contains(text, "最近操作") || strings.Contains(text, "任务结果") {
+		t.Fatalf("result title should be user-facing: %s", text)
+	}
+	if !strings.Contains(text, "建议：检查端口占用") {
+		t.Fatalf("missing failure hint: %s", text)
+	}
+}
+
+func TestHubDecommissionQueuesDryRunAndRequiresExactConfirm(t *testing.T) {
+	root := t.TempDir()
+	state := filepath.Join(root, "hub")
+	reg := defaultHubRegistry()
+	reg["agents"] = obj{
+		"transit-la": obj{
+			"kind":      agentRegistrationKind,
+			"version":   version,
+			"id":        "transit-la",
+			"role":      "transit",
+			"name":      "LA Transit",
+			"transport": "poll",
+		},
+	}
+	if err := saveHubRegistry(state, reg); err != nil {
+		t.Fatal(err)
+	}
+	preview, err := hubDispatchCommand(state, "/decommission transit-la --mode uninstall")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(preview, "退役预览") || !strings.Contains(preview, "节点本机授权") {
+		t.Fatalf("preview = %s", preview)
+	}
+	tasks, err := listHubTasks(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 1 || str(tasks[0]["command"]) != "decommission_agent" || str(tasks[0]["agent_id"]) != "transit-la" {
+		t.Fatalf("tasks = %#v", tasks)
+	}
+	payload := asObj(tasks[0]["payload"])
+	if payload["dry_run"] != true || str(payload["mode"]) != "uninstall" {
+		t.Fatalf("payload = %#v", payload)
+	}
+	if _, err := hubDispatchCommand(state, "/decommission transit-la --mode uninstall --confirm landing-jp"); err == nil {
+		t.Fatal("expected exact confirm to be required")
+	}
+	confirmed, err := hubDispatchCommand(state, "/decommission transit-la --mode uninstall --confirm transit-la")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(confirmed, "已下发远程退役") || !strings.Contains(confirmed, "transit-la") {
+		t.Fatalf("confirmed = %s", confirmed)
+	}
+	tasks, err = listHubTasks(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload = asObj(tasks[0]["payload"])
+	for _, task := range tasks {
+		if str(task["origin_text"]) == "/decommission transit-la --mode uninstall --confirm transit-la" {
+			payload = asObj(task["payload"])
+			break
+		}
+	}
+	if payload["dry_run"] != false || str(payload["mode"]) != "uninstall" {
+		t.Fatalf("confirmed payload = %#v", payload)
+	}
+}
+
+func TestHubLinkQueuesDetailRefreshWhenEndpointSnapshotMissing(t *testing.T) {
+	root := t.TempDir()
+	state := filepath.Join(root, "hub")
+	reg := defaultHubRegistry()
+	reg["agents"] = obj{
+		"transit-la": obj{
+			"kind":      agentRegistrationKind,
+			"version":   version,
+			"id":        "transit-la",
+			"role":      "transit",
+			"name":      "LA Transit",
+			"transport": "poll",
+			"topology":  obj{"links": []any{}, "endpoints": []any{}, "inbounds": []any{}},
+		},
+		"landing-jp": obj{
+			"kind":      agentRegistrationKind,
+			"version":   version,
+			"id":        "landing-jp",
+			"role":      "landing",
+			"name":      "JP Landing",
+			"transport": "poll",
+			"topology":  obj{"links": []any{}, "endpoints": []any{}, "inbounds": []any{}},
+		},
+	}
+	if err := saveHubRegistry(state, reg); err != nil {
+		t.Fatal(err)
+	}
+	queued, err := hubDispatchCommand(state, "/link transit-la landing-jp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(queued, "需要刷新节点详情") || !strings.Contains(queued, "已下发节点详情刷新") || !strings.Contains(queued, "刷新完成后再次串联") {
+		t.Fatalf("queued = %s", queued)
+	}
+	tasks, err := listHubTasks(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 2 {
+		t.Fatalf("expected transit+landing refresh tasks, got %#v", tasks)
+	}
+	seen := map[string]bool{}
+	for _, task := range tasks {
+		if str(task["command"]) != "sync_agent" {
+			t.Fatalf("expected sync_agent task, got %#v", task)
+		}
+		seen[str(task["agent_id"])] = true
+	}
+	if !seen["transit-la"] || !seen["landing-jp"] {
+		t.Fatalf("refresh tasks should target both link endpoints: %#v", tasks)
+	}
+}
+
+func TestExecuteProbeLinkTaskReportsReachableTCP(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	accepted := make(chan struct{})
+	go func() {
+		conn, err := listener.Accept()
+		if err == nil {
+			_ = conn.Close()
+		}
+		close(accepted)
+	}()
+	host, portText, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := executeTask(obj{
+		"command": "probe_link",
+		"payload": obj{
+			"host":            host,
+			"port":            port,
+			"timeout_seconds": 1,
+			"landing_id":      "landing-jp",
+			"endpoint_name":   "jp",
+		},
+	}, "", "")
+	if result["success"] != true || result["reachable"] != true || str(result["target"]) != net.JoinHostPort(host, portText) {
+		t.Fatalf("result = %#v", result)
+	}
+	if _, ok := result["duration_ms"]; !ok || !strings.Contains(str(result["text"]), "连通") {
+		t.Fatalf("result text/duration = %#v", result)
+	}
+	select {
+	case <-accepted:
+	case <-time.After(time.Second):
+		t.Fatal("probe did not reach listener")
+	}
+}
+
+func TestExecuteProbeLinkTaskCapsTimeoutAndReportsUnreachable(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, portText, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	result := executeTask(obj{
+		"command": "probe_link",
+		"payload": obj{
+			"host":            host,
+			"port":            port,
+			"timeout_seconds": 999,
+			"landing_id":      "landing-jp",
+			"endpoint_name":   "jp",
+		},
+	}, "", "")
+	if result["success"] != false || result["reachable"] != false || int64Value(result["timeout_seconds"]) != 5 {
+		t.Fatalf("result = %#v", result)
+	}
+	if !strings.Contains(str(result["text"]), "不可达") || str(result["error"]) == "" {
+		t.Fatalf("result text/error = %#v", result)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("closed local-port probe should fail quickly, took %s; result=%#v", elapsed, result)
+	}
+}
+
+func TestExecuteDecommissionAgentTaskRequiresLocalPolicy(t *testing.T) {
+	root := t.TempDir()
+	state := filepath.Join(root, "state")
+	conf := filepath.Join(root, "conf")
+	if err := os.MkdirAll(conf, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	managed := filepath.Join(conf, "90-relaypilot-outbounds.json")
+	user := filepath.Join(conf, "user.json")
+	if err := os.WriteFile(managed, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(user, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result := executeTask(obj{
+		"command": "decommission_agent",
+		"payload": obj{"mode": "uninstall", "dry_run": true},
+	}, state, conf)
+	if result["success"] != false || !strings.Contains(str(result["error"]), "allow_remote_decommission") {
+		t.Fatalf("default-deny result = %#v", result)
+	}
+	if _, err := os.Stat(managed); err != nil {
+		t.Fatalf("dry denied task should not remove managed config: %v", err)
+	}
+
+	if err := writeJSON(filepath.Join(state, "agent-policy.json"), obj{"allow_remote_decommission": true}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result = executeTask(obj{
+		"command": "decommission_agent",
+		"payload": obj{"mode": "uninstall", "dry_run": true},
+	}, state, conf)
+	if result["success"] != true || result["dry_run"] != true || str(result["mode"]) != "uninstall" {
+		t.Fatalf("preview result = %#v", result)
+	}
+	text := str(result["text"])
+	if !strings.Contains(text, "远程退役预览") || !strings.Contains(text, "90-relaypilot-outbounds.json") || strings.Contains(text, "user.json") {
+		t.Fatalf("preview text = %s", text)
+	}
+	if _, err := os.Stat(managed); err != nil {
+		t.Fatalf("preview should not remove managed config: %v", err)
+	}
+}
+
+func TestExecuteDecommissionAgentTaskRunsConfirmedCleanupViaLocalCLI(t *testing.T) {
+	root := t.TempDir()
+	state := filepath.Join(root, "state")
+	conf := filepath.Join(root, "conf")
+	if err := writeJSON(filepath.Join(state, "agent-policy.json"), obj{"allow_remote_decommission": true}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(root, "decommission.log")
+	cli := filepath.Join(root, "relaypilot")
+	writeExecutable(t, cli, "#!/usr/bin/env sh\nprintf 'STATE_DIR=%s\\nCONF_DIR=%s\\nARGS=%s\\n' \"$STATE_DIR\" \"$CONF_DIR\" \"$*\" > \"$RELAYPILOT_TEST_COMMAND_LOG\"\n")
+	t.Setenv("RELAYPILOT_CLI", cli)
+	t.Setenv("RELAYPILOT_TEST_COMMAND_LOG", logPath)
+	t.Setenv("RELAYPILOT_DECOMMISSION_EXEC_MODE", "foreground")
+
+	result := executeTask(obj{
+		"command": "decommission_agent",
+		"payload": obj{"mode": "uninstall", "dry_run": false, "delay_seconds": 1},
+	}, state, conf)
+	if result["success"] != true || result["dry_run"] != false || str(result["mode"]) != "uninstall" {
+		t.Fatalf("confirmed result = %#v", result)
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logText := string(logData)
+	if !strings.Contains(logText, "STATE_DIR="+state) || !strings.Contains(logText, "CONF_DIR="+conf) {
+		t.Fatalf("cleanup env missing: %s", logText)
+	}
+	if !strings.Contains(logText, "ARGS=uninstall --full --purge-proxy-config --yes") {
+		t.Fatalf("cleanup args missing: %s", logText)
+	}
+}
+
+func TestTelegramProbeHelpListsDetectedLinksWithoutProbing(t *testing.T) {
+	root := t.TempDir()
+	state := filepath.Join(root, "hub")
+	reg := defaultHubRegistry()
+	reg["agents"] = obj{
+		"transit-la": obj{
+			"kind":      agentRegistrationKind,
+			"version":   version,
+			"id":        "transit-la",
+			"role":      "transit",
+			"name":      "LA Transit",
+			"transport": "poll",
+			"topology": obj{"links": []any{
+				obj{"auth_user": "jp", "endpoint_name": "jp", "outbound_tag": "landing-jp-ss", "server": "127.0.0.1", "server_port": 2443},
+			}},
+		},
+		"landing-jp": obj{
+			"kind":      agentRegistrationKind,
+			"version":   version,
+			"id":        "landing-jp",
+			"role":      "landing",
+			"name":      "JP Landing",
+			"transport": "poll",
+			"topology": obj{"endpoints": []any{
+				obj{"name": "jp", "protocol": "shadowsocks", "server": "127.0.0.1", "server_port": 2443, "tag": "landing-jp-ss"},
+			}},
+		},
+	}
+	if err := saveHubRegistry(state, reg); err != nil {
+		t.Fatal(err)
+	}
+	reply := handleTelegramHubReply(state, obj{"update_id": 9, "callback_query": obj{"data": "rp:probe_help", "message": obj{"chat": obj{"id": "999"}}}})
+	if !strings.Contains(reply.Text, "可检测链路") || !strings.Contains(reply.Text, "/relaypilot_probe transit-la landing-jp jp") {
+		t.Fatalf("probe help should list copyable detected links: %#v", reply)
+	}
+	if !strings.Contains(reply.Text, "仅生成命令，不会立即探测") {
+		t.Fatalf("probe help should make resource behavior explicit: %#v", reply)
+	}
+}
+
+func TestExecuteBindEndpointTaskChecksRestartsAndReportsDataPlaneApply(t *testing.T) {
+	root := t.TempDir()
+	state := filepath.Join(root, "state")
+	conf := filepath.Join(root, "conf")
+	if err := writeJSON(filepath.Join(conf, "00-inbounds.json"), obj{"inbounds": []any{obj{"type": "vless", "tag": "vless-in", "users": []any{}}}}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSON(filepath.Join(conf, "01-outbounds.json"), obj{"outbounds": []any{obj{"type": "direct", "tag": "direct"}}}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSON(filepath.Join(conf, "02-route.json"), obj{"route": obj{"rules": []any{}, "final": "direct"}}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(root, "commands.log")
+	binDir := filepath.Join(root, "bin")
+	writeExecutable(t, filepath.Join(binDir, "sing-box"), "#!/usr/bin/env sh\nprintf 'sing-box %s\\n' \"$*\" >> \"$RELAYPILOT_TEST_COMMAND_LOG\"\nexit 0\n")
+	writeExecutable(t, filepath.Join(binDir, "systemctl"), "#!/usr/bin/env sh\nprintf 'systemctl %s\\n' \"$*\" >> \"$RELAYPILOT_TEST_COMMAND_LOG\"\nif [ \"$1\" = is-active ]; then exit 0; fi\nexit 0\n")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("RELAYPILOT_TEST_COMMAND_LOG", logPath)
+
+	task := obj{
+		"command":    "bind_endpoint",
+		"agent_id":   "transit-la",
+		"agent_role": "transit",
+		"payload": obj{
+			"inbound_tag": "vless-in",
+			"auth_user":   "jp",
+			"client_uuid": "55555555-5555-4555-8555-555555555555",
+			"endpoint": obj{
+				"kind":        endpointKind,
+				"version":     version,
+				"name":        "jp",
+				"protocol":    "shadowsocks",
+				"server":      "203.0.113.20",
+				"server_port": 2443,
+				"method":      "2022-blake3-aes-128-gcm",
+				"password":    "MDEyMzQ1Njc4OWFiY2RlZg==",
+				"tag":         "landing-jp-ss",
+			},
+		},
+	}
+	result := executeBindEndpointTask(task, state, conf)
+	if result["success"] != true {
+		t.Fatalf("result = %#v", result)
+	}
+	apply := asObj(result["apply"])
+	if apply["applied"] != true {
+		t.Fatalf("apply = %#v", apply)
+	}
+	if asObj(apply["check"])["status"] != "ok" || asObj(apply["reload"])["status"] != "ok" || asObj(apply["restart"])["status"] != "skipped" || asObj(apply["status"])["status"] != "ok" {
+		t.Fatalf("apply detail = %#v", apply)
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logText := string(logData)
+	if !strings.Contains(logText, "sing-box check -C "+conf) {
+		t.Fatalf("missing sing-box check: %s", logText)
+	}
+	if !strings.Contains(logText, "systemctl reload sing-box") || strings.Contains(logText, "systemctl restart sing-box") || !strings.Contains(logText, "systemctl is-active sing-box") {
+		t.Fatalf("missing reload/status or unexpected restart: %s", logText)
+	}
+	if !strings.Contains(str(result["text"]), "sing-box 已热重载并确认运行") {
+		t.Fatalf("text = %#v", result["text"])
+	}
+}
+
+func TestExecuteBindEndpointTaskFallsBackToRestartWhenReloadFails(t *testing.T) {
+	root := t.TempDir()
+	state := filepath.Join(root, "state")
+	conf := filepath.Join(root, "conf")
+	if err := writeJSON(filepath.Join(conf, "00-inbounds.json"), obj{"inbounds": []any{obj{"type": "vless", "tag": "vless-in", "users": []any{}}}}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSON(filepath.Join(conf, "01-outbounds.json"), obj{"outbounds": []any{obj{"type": "direct", "tag": "direct"}}}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSON(filepath.Join(conf, "02-route.json"), obj{"route": obj{"rules": []any{}, "final": "direct"}}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(root, "commands.log")
+	binDir := filepath.Join(root, "bin")
+	writeExecutable(t, filepath.Join(binDir, "sing-box"), "#!/usr/bin/env sh\nprintf 'sing-box %s\\n' \"$*\" >> \"$RELAYPILOT_TEST_COMMAND_LOG\"\nexit 0\n")
+	writeExecutable(t, filepath.Join(binDir, "systemctl"), "#!/usr/bin/env sh\nprintf 'systemctl %s\\n' \"$*\" >> \"$RELAYPILOT_TEST_COMMAND_LOG\"\nif [ \"$1\" = reload ]; then exit 9; fi\nif [ \"$1\" = is-active ]; then exit 0; fi\nexit 0\n")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("RELAYPILOT_TEST_COMMAND_LOG", logPath)
+
+	result := executeBindEndpointTask(obj{
+		"command":    "bind_endpoint",
+		"agent_id":   "transit-la",
+		"agent_role": "transit",
+		"payload": obj{
+			"inbound_tag": "vless-in",
+			"auth_user":   "jp",
+			"client_uuid": "55555555-5555-4555-8555-555555555555",
+			"endpoint": obj{
+				"kind":        endpointKind,
+				"version":     version,
+				"name":        "jp",
+				"protocol":    "shadowsocks",
+				"server":      "203.0.113.20",
+				"server_port": 2443,
+				"method":      "2022-blake3-aes-128-gcm",
+				"password":    "MDEyMzQ1Njc4OWFiY2RlZg==",
+				"tag":         "landing-jp-ss",
+			},
+		},
+	}, state, conf)
+	if result["success"] != true {
+		t.Fatalf("result = %#v", result)
+	}
+	apply := asObj(result["apply"])
+	if asObj(apply["reload"])["status"] != "failed" || asObj(apply["restart"])["status"] != "ok" || apply["applied"] != true {
+		t.Fatalf("apply should fallback to restart: %#v", apply)
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logText := string(logData)
+	if !strings.Contains(logText, "systemctl reload sing-box") || !strings.Contains(logText, "systemctl restart sing-box") {
+		t.Fatalf("missing reload fallback restart: %s", logText)
+	}
+	if !strings.Contains(str(result["text"]), "热重载失败后已重启并确认运行") {
+		t.Fatalf("text = %#v", result["text"])
+	}
+}
+
+func TestExecuteBindEndpointTaskFailsOnSingBoxCheckError(t *testing.T) {
+	root := t.TempDir()
+	state := filepath.Join(root, "state")
+	conf := filepath.Join(root, "conf")
+	if err := writeJSON(filepath.Join(conf, "00-inbounds.json"), obj{"inbounds": []any{obj{"type": "vless", "tag": "vless-in", "users": []any{}}}}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSON(filepath.Join(conf, "01-outbounds.json"), obj{"outbounds": []any{obj{"type": "direct", "tag": "direct"}}}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSON(filepath.Join(conf, "02-route.json"), obj{"route": obj{"rules": []any{}, "final": "direct"}}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(root, "commands.log")
+	binDir := filepath.Join(root, "bin")
+	writeExecutable(t, filepath.Join(binDir, "sing-box"), "#!/usr/bin/env sh\nprintf 'sing-box %s\\n' \"$*\" >> \"$RELAYPILOT_TEST_COMMAND_LOG\"\necho bad config >&2\nexit 7\n")
+	writeExecutable(t, filepath.Join(binDir, "systemctl"), "#!/usr/bin/env sh\nprintf 'systemctl %s\\n' \"$*\" >> \"$RELAYPILOT_TEST_COMMAND_LOG\"\nexit 0\n")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("RELAYPILOT_TEST_COMMAND_LOG", logPath)
+
+	result := executeBindEndpointTask(obj{
+		"command":    "bind_endpoint",
+		"agent_id":   "transit-la",
+		"agent_role": "transit",
+		"payload": obj{
+			"inbound_tag": "vless-in",
+			"auth_user":   "jp",
+			"client_uuid": "55555555-5555-4555-8555-555555555555",
+			"endpoint": obj{
+				"kind":        endpointKind,
+				"version":     version,
+				"name":        "jp",
+				"protocol":    "shadowsocks",
+				"server":      "203.0.113.20",
+				"server_port": 2443,
+				"method":      "2022-blake3-aes-128-gcm",
+				"password":    "MDEyMzQ1Njc4OWFiY2RlZg==",
+				"tag":         "landing-jp-ss",
+			},
+		},
+	}, state, conf)
+	if result["success"] != false || !strings.Contains(str(result["error"]), "sing-box check failed") {
+		t.Fatalf("result = %#v", result)
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logText := string(logData)
+	if strings.Contains(logText, "systemctl restart") {
+		t.Fatalf("restart should not run after failed check: %s", logText)
+	}
+}
+
 func TestHubLinkTransitLandingMeshModeWritesOverlayEndpoint(t *testing.T) {
+	t.Setenv("RELAYPILOT_DISABLE_DATAPLANE_APPLY", "1")
 	root := t.TempDir()
 	hubState := filepath.Join(root, "hub")
 	landingState := filepath.Join(root, "landing")
@@ -1356,6 +2022,27 @@ func TestTelegramHubUpdateDispatchAndAPIEncoding(t *testing.T) {
 	if !strings.Contains(panelReply.Text, "RelayPilot 控制中枢") || panelReply.ParseMode != "HTML" || len(panelReply.ReplyMarkup) == 0 {
 		t.Fatalf("panel reply = %#v", panelReply)
 	}
+	panelMarkup, _ := json.Marshal(panelReply.ReplyMarkup)
+	if strings.Contains(panelReply.Text, "下一步") || strings.Contains(panelReply.Text, "任务结果") {
+		t.Fatalf("panel should not expose next-step/task wording: text=%s", panelReply.Text)
+	}
+	if !strings.Contains(panelReply.Text, "最近操作") || !bytes.Contains(panelMarkup, []byte("rp:sync_all")) || !bytes.Contains(panelMarkup, []byte("rp:probe_help")) || !bytes.Contains(panelMarkup, []byte("最近操作")) {
+		t.Fatalf("panel should surface status actions: text=%s markup=%s", panelReply.Text, panelMarkup)
+	}
+	if bytes.Contains(panelMarkup, []byte("rp:guide")) || bytes.Contains(panelMarkup, []byte("操作向导")) {
+		t.Fatalf("telegram hub panel should not expose operation guide as a main action, markup=%s", panelMarkup)
+	}
+	if bytes.Contains(panelMarkup, []byte("生成")) || bytes.Contains(panelMarkup, []byte("导出")) {
+		t.Fatalf("telegram hub panel should stay status-focused, markup=%s", panelMarkup)
+	}
+	probeHelp := handleTelegramHubReply(state, obj{"update_id": 8, "callback_query": obj{"data": "rp:probe_help", "message": obj{"chat": obj{"id": "999"}}}})
+	if !strings.Contains(probeHelp.Text, "链路检测") || !strings.Contains(probeHelp.Text, "/relaypilot_probe") || !strings.Contains(probeHelp.Text, "不会启动后台监控") {
+		t.Fatalf("probe help reply = %#v", probeHelp)
+	}
+	syncReply := handleTelegramHubReply(state, obj{"update_id": 7, "callback_query": obj{"data": "rp:sync_all", "message": obj{"chat": obj{"id": "999"}}}})
+	if !strings.Contains(syncReply.Text, "已下发节点详情刷新") {
+		t.Fatalf("sync reply = %#v", syncReply)
+	}
 	updateReply := handleTelegramHubReply(state, obj{"update_id": 5, "callback_query": obj{"data": "rp:update", "message": obj{"chat": obj{"id": "999"}}}})
 	if !strings.Contains(updateReply.Text, "<code>/relaypilot_update hub ") || !strings.Contains(updateReply.Text, "--restart</code>") {
 		t.Fatalf("update reply = %#v", updateReply)
@@ -1380,10 +2067,16 @@ func TestTelegramHubUpdateDispatchAndAPIEncoding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tasks) != 1 || tasks[0]["agent_id"] != "transit-hk" {
-		t.Fatalf("tasks = %#v", tasks)
+	var task obj
+	for _, candidate := range tasks {
+		if candidate["agent_id"] == "transit-hk" && candidate["command"] == "status" {
+			task = candidate
+			break
+		}
 	}
-	task := tasks[0]
+	if len(task) == 0 {
+		t.Fatalf("status task missing: %#v", tasks)
+	}
 	if _, err := completeHubTask(state, str(task["id"]), "transit-hk", obj{"success": true, "command": "status", "text": "agent ok"}); err != nil {
 		t.Fatal(err)
 	}
@@ -1747,7 +2440,7 @@ func TestResourceGuardsLimitJSONHTTPAndTaskBatch(t *testing.T) {
 	}
 }
 
-func TestAgentPollerReportsDynamicIPMode(t *testing.T) {
+func TestAgentPollerHeartbeatIsMinimal(t *testing.T) {
 	state := t.TempDir()
 	registration, err := buildHubAgentRegistration("agent-a", "landing", "Agent A", "")
 	if err != nil {
@@ -1775,22 +2468,25 @@ func TestAgentPollerReportsDynamicIPMode(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if probes != 1 {
-		t.Fatalf("public IP probes = %d", probes)
+	if probes != 0 {
+		t.Fatalf("heartbeat should not probe public IP, got %d", probes)
 	}
 	agents, err := listHubAgents(state)
 	if err != nil {
 		t.Fatal(err)
 	}
 	network := asObj(agents[0]["network"])
-	if str(network["ip_mode"]) != "dynamic" || str(network["public_ip"]) != "198.51.100.23" {
+	if network["reported_at"] == nil {
 		t.Fatalf("network = %#v", network)
+	}
+	if network["ip_mode"] != nil || network["public_ip"] != nil {
+		t.Fatalf("minimal heartbeat leaked network fields: %#v", network)
 	}
 	if net.ParseIP(str(network["observed_ip"])) == nil {
 		t.Fatalf("observed_ip = %#v, network = %#v", network["observed_ip"], network)
 	}
-	if listing := formatAgentsText(agents); !strings.Contains(listing, "动态IP 198.51.100.23") {
-		t.Fatalf("agent listing missing IP mode: %q", listing)
+	if listing := formatAgentsText(agents); strings.Contains(listing, "动态IP") {
+		t.Fatalf("agent listing should not advertise dynamic IP from heartbeat: %q", listing)
 	}
 }
 
@@ -1825,36 +2521,26 @@ func TestUpdateAgentIPModePreservesEnrollment(t *testing.T) {
 	}
 }
 
-func TestDynamicIPProbeErrorsAreThrottled(t *testing.T) {
+func TestHeartbeatNetworkPayloadIsMinimal(t *testing.T) {
 	poller := newAgentPoller("http://127.0.0.1", "agent-a", "secret", "landing", t.TempDir(), "", 0, time.Second, 0)
 	poller.ipMode = "dynamic"
-	poller.publicIPInterval = time.Hour
-	probes := 0
-	poller.publicIPProbe = func(time.Duration) (string, error) {
-		probes++
-		return "", errors.New("probe unavailable")
-	}
-	first := poller.network()
-	second := poller.network()
-	if probes != 1 {
-		t.Fatalf("public IP probe should be throttled after errors, got %d", probes)
-	}
-	if str(first["public_ip_error"]) == "" || str(second["public_ip_error"]) == "" {
-		t.Fatalf("probe error not reported: first=%#v second=%#v", first, second)
+	network := poller.network()
+	if len(network) != 1 || network["reported_at"] == nil {
+		t.Fatalf("network payload = %#v", network)
 	}
 }
 
-func TestDynamicIPProbeTimeoutIsCapped(t *testing.T) {
+func TestHeartbeatDoesNotCallPublicIPProbe(t *testing.T) {
 	poller := newAgentPoller("http://127.0.0.1", "agent-a", "secret", "landing", t.TempDir(), "", 0, 30*time.Second, 0)
 	poller.ipMode = "dynamic"
-	var got time.Duration
+	called := false
 	poller.publicIPProbe = func(timeout time.Duration) (string, error) {
-		got = timeout
+		called = true
 		return "198.51.100.42", nil
 	}
 	_ = poller.network()
-	if got > defaultPublicIPProbeTimeout {
-		t.Fatalf("public IP probe timeout = %s, want <= %s", got, defaultPublicIPProbeTimeout)
+	if called {
+		t.Fatal("heartbeat network path should not invoke public IP probe")
 	}
 }
 
@@ -1941,6 +2627,23 @@ func TestMakeAgentRegistrationWithSnapshotAndLabels(t *testing.T) {
 	}
 	if asObj(reg["health"])["status"] != "ok" {
 		t.Fatalf("health = %#v", reg["health"])
+	}
+}
+
+func TestCollectTopologyIncludesRealityClientWithoutPrivateKey(t *testing.T) {
+	root := t.TempDir()
+	state := filepath.Join(root, "state")
+	conf := filepath.Join(root, "conf")
+	if _, err := ensureTransitReality(conf, state, "::", 443, "vless-in", "addons.mozilla.org", "addons.mozilla.org", 443, "", "0123456789abcdef", "1m", false); err != nil {
+		t.Fatal(err)
+	}
+	topo := collectTopology("transit", state, conf)
+	realityClient := asObj(topo["reality_client"])
+	if realityClient["server_name"] != "addons.mozilla.org" || realityClient["public_key"] == "" || realityClient["short_id"] == "" {
+		t.Fatalf("reality_client = %#v", realityClient)
+	}
+	if realityClient["private_key"] != nil {
+		t.Fatalf("reality_client leaked private key: %#v", realityClient)
 	}
 }
 
@@ -2051,6 +2754,234 @@ func TestRenderLandingImportAndBindTransit(t *testing.T) {
 	}
 	if str(asObj(rules[1])["outbound"]) != "direct" {
 		t.Fatalf("unknown rule not preserved: %#v", rules)
+	}
+}
+
+func TestRenderLandingSOCKSAndBindTransit(t *testing.T) {
+	root := t.TempDir()
+	endpoint, config, err := renderLandingSOCKS("la", "198.51.100.20", "::", 1080, 2080, "sub2api", "secret-pass", "socks-in", "landing-la-socks")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inbound := asObj(asList(config["inbounds"])[0])
+	if inbound["type"] != "socks" || inbound["listen_port"] != 1080 {
+		t.Fatalf("bad landing socks config: %#v", config)
+	}
+	users := asList(inbound["users"])
+	if len(users) != 1 || asObj(users[0])["username"] != "sub2api" {
+		t.Fatalf("bad socks users: %#v", users)
+	}
+	endpointPath := filepath.Join(root, "la.json")
+	if err := writeJSON(endpointPath, endpoint, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	state := filepath.Join(root, "state")
+	if _, err := importEndpoint(endpointPath, state); err != nil {
+		t.Fatal(err)
+	}
+	conf := filepath.Join(root, "conf")
+	if err := writeJSON(filepath.Join(conf, "00-inbounds.json"), obj{"inbounds": []any{obj{"type": "vless", "tag": "vless-in", "users": []any{}}}}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSON(filepath.Join(conf, "01-outbounds.json"), obj{"outbounds": []any{obj{"type": "direct", "tag": "direct"}}}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSON(filepath.Join(conf, "02-route.json"), obj{"route": obj{"rules": []any{}, "final": "direct"}}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	summary, err := bindTransit(conf, endpoint, "vless-in", "la", "55555555-5555-4555-8555-555555555555", "xtls-rprx-vision", true, state, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary["outbound_tag"] != "landing-la-socks" {
+		t.Fatalf("summary = %#v", summary)
+	}
+	outbounds, _ := loadJSON(filepath.Join(conf, "01-outbounds.json"))
+	found := false
+	for _, raw := range asList(outbounds["outbounds"]) {
+		outbound := asObj(raw)
+		if str(outbound["tag"]) == "landing-la-socks" {
+			found = true
+			if outbound["type"] != "socks" || outbound["version"] != "5" || outbound["username"] != "sub2api" || outbound["password"] != "secret-pass" {
+				t.Fatalf("bad socks outbound: %#v", outbound)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("socks outbound missing: %#v", outbounds)
+	}
+}
+
+func TestRenderLandingSOCKSRequiresCredentialPair(t *testing.T) {
+	if _, _, err := renderLandingSOCKS("la", "198.51.100.20", "::", 1080, 1080, "sub2api", "", "socks-in", "landing-la-socks"); err == nil {
+		t.Fatal("expected credential pair validation error")
+	}
+}
+
+func TestHubExportTransitClientUsesRealitySnapshotAndPublicEntry(t *testing.T) {
+	root := t.TempDir()
+	hubState := filepath.Join(root, "hub")
+	reg := defaultHubRegistry()
+	reg["agents"] = obj{
+		"transit-la": obj{
+			"kind":      agentRegistrationKind,
+			"version":   version,
+			"id":        "transit-la",
+			"role":      "transit",
+			"name":      "LA Transit",
+			"transport": "poll",
+			"network": obj{
+				"public_entries": []any{
+					obj{"use": "reality", "name": "main", "host": "edge.example", "public_port": 443},
+				},
+			},
+			"topology": obj{
+				"inbounds": []any{
+					obj{"tag": "vless-in", "type": "vless", "listen": "::", "listen_port": 443, "users": []any{
+						obj{"name": "alice", "uuid": "11111111-1111-4111-8111-111111111111", "flow": "xtls-rprx-vision"},
+						obj{"name": "bob", "uuid": "22222222-2222-4222-8222-222222222222", "flow": "xtls-rprx-vision"},
+					}},
+				},
+				"reality_client": obj{
+					"inbound_tag": "vless-in",
+					"listen":      "::",
+					"listen_port": 443,
+					"server_name": "addons.mozilla.org",
+					"public_key":  "pubkey123",
+					"short_id":    "abcd1234",
+				},
+			},
+			"sync_at": now(),
+		},
+	}
+	if err := saveHubRegistry(hubState, reg); err != nil {
+		t.Fatal(err)
+	}
+	exported, err := hubExportTransitClient(hubState, "transit-la", "bob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exported["server"] != "edge.example" || int64Value(exported["server_port"]) != 443 {
+		t.Fatalf("server export = %#v", exported)
+	}
+	if exported["auth_user"] != "bob" || exported["public_key"] != "pubkey123" || exported["short_id"] != "abcd1234" {
+		t.Fatalf("bad export = %#v", exported)
+	}
+	profile := asObj(exported["profile"])
+	if profile["uuid"] != "22222222-2222-4222-8222-222222222222" || profile["server_name"] != "addons.mozilla.org" {
+		t.Fatalf("profile = %#v", profile)
+	}
+	cache := asObj(exported["cache"])
+	if cache["source"] != "hub-registry" || cache["synced_at"] == nil {
+		t.Fatalf("cache = %#v", cache)
+	}
+}
+
+func TestHubExportLandingConfigUsesSecureCache(t *testing.T) {
+	root := t.TempDir()
+	hubState := filepath.Join(root, "hub")
+	endpoint, err := validateEndpoint(obj{
+		"kind":          endpointKind,
+		"version":       version,
+		"name":          "la-direct",
+		"protocol":      "socks",
+		"server":        "198.51.100.20",
+		"server_port":   2080,
+		"socks_version": "5",
+		"username":      "sub2api",
+		"password":      "secret-pass",
+		"tag":           "landing-la-direct-socks",
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := storeHubLandingExport(hubState, "landing-la", endpoint, nil); err != nil {
+		t.Fatal(err)
+	}
+	exported, err := hubExportLandingConfig(hubState, "landing-la", "la-direct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exported["protocol"] != "socks" || exported["server"] != "198.51.100.20" {
+		t.Fatalf("exported = %#v", exported)
+	}
+	cfg := asObj(exported["config"])
+	if cfg["username"] != "sub2api" || cfg["password"] != "secret-pass" {
+		t.Fatalf("config = %#v", cfg)
+	}
+	cache := asObj(exported["cache"])
+	if cache["source"] != "hub-export-file" || cache["synced_at"] == nil {
+		t.Fatalf("cache = %#v", cache)
+	}
+}
+
+func TestFormatAgentsTextShowsSyncStatus(t *testing.T) {
+	agents := []obj{
+		obj{"id": "a", "role": "transit", "name": "A", "last_seen": now(), "updated_at": now()},
+		obj{"id": "b", "role": "landing", "name": "B", "last_seen": now(), "updated_at": now(), "sync_at": now()},
+	}
+	text := formatAgentsText(agents)
+	if !strings.Contains(text, "未刷新详情") || !strings.Contains(text, "上次刷新") {
+		t.Fatalf("sync labels missing: %s", text)
+	}
+}
+
+func TestCompleteHubSyncTaskStoresTopologyAndPublicEntries(t *testing.T) {
+	root := t.TempDir()
+	hubState := filepath.Join(root, "hub")
+	reg := defaultHubRegistry()
+	reg["agents"] = obj{
+		"transit-la": obj{
+			"kind":      agentRegistrationKind,
+			"version":   version,
+			"id":        "transit-la",
+			"role":      "transit",
+			"name":      "LA Transit",
+			"transport": "poll",
+			"topology":  obj{},
+			"network":   obj{"reported_at": 1},
+		},
+	}
+	if err := saveHubRegistry(hubState, reg); err != nil {
+		t.Fatal(err)
+	}
+	task, err := createHubTask(hubState, asObj(asObj(reg["agents"])["transit-la"]), "sync_agent", nil, "batch-sync", "test-sync")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := obj{
+		"success": true,
+		"command": "sync_agent",
+		"topology": obj{
+			"links": []any{},
+			"inbounds": []any{
+				obj{"tag": "vless-in", "type": "vless", "users": []any{obj{"name": "alice", "uuid": "u"}}},
+			},
+			"reality_client": obj{"server_name": "addons.mozilla.org", "public_key": "pub", "short_id": "abcd"},
+		},
+		"network": obj{
+			"public_entries": []any{obj{"use": "reality", "name": "main", "host": "edge.example", "public_port": 443}},
+		},
+	}
+	if _, err := completeHubTask(hubState, str(task["id"]), "transit-la", result); err != nil {
+		t.Fatal(err)
+	}
+	agents, err := listHubAgents(hubState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := findHubAgentByID(agents, "transit-la")
+	if err != nil {
+		t.Fatal(err)
+	}
+	topo := asObj(agent["topology"])
+	if len(asList(topo["inbounds"])) != 1 || asObj(topo["reality_client"])["public_key"] != "pub" {
+		t.Fatalf("stored topology = %#v", topo)
+	}
+	network := asObj(agent["network"])
+	entries := asList(network["public_entries"])
+	if len(entries) != 1 || asObj(entries[0])["host"] != "edge.example" {
+		t.Fatalf("stored network = %#v", network)
 	}
 }
 

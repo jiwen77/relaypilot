@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.6
+
+- Refine the Hub/Agent interactive flow so menus are state-aware and advanced/destructive operations stay out of the primary path.
+- Add one-command Hub invites that enroll Agents interactively and offer role-specific local data-plane setup.
+- Add Telegram Hub panel improvements focused on status, recent operations, link checks, update commands, and test delivery.
+- Add on-demand low-resource link probes and rename manual detail sync to refresh node details.
+- Add safe remote decommission tasks with Agent-side opt-in policy and dry-run-by-default behavior.
+- Apply sing-box changes with check plus hot reload first, falling back to restart only when needed.
+- Hot-read Agent enrollment changes during polling so IP mode and public-IP interval updates take effect without restarting the Agent service.
+- Add concise default prompt styling and cleanup of operator-facing wording.
+
 ## 0.1.5
 
 - Refuse interactive menus without a TTY so automation probes cannot leave stuck menu processes on remote hosts.

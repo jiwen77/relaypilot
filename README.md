@@ -1,6 +1,6 @@
 # RelayPilot
 
-Lightweight relay and landing node orchestration, starting with sing-box. It works on NAT boxes, VPS, VDS, and dedicated servers.
+Secure, lightweight sing-box node orchestration for Hub-managed transit and landing relays. It works on NAT boxes, VPS, VDS, and dedicated servers.
 
 Single user-facing script:
 
@@ -89,7 +89,7 @@ Automation:
 
 ```bash
 relaypilot update
-relaypilot update --version v0.1.5 --restart-services
+relaypilot update --version v0.1.6 --restart-services
 ```
 
 The update replaces the Bash entrypoint and Go core binary. Running services keep
@@ -106,12 +106,15 @@ Transit role writes/updates a VLESS Reality inbound:
 relaypilot transit-init-reality
 ```
 
-It generates the Reality private key and short_id when omitted, preserves existing users on updates, runs `sing-box check`, and optionally restarts sing-box.
+It generates the Reality private key and short_id when omitted, preserves existing users on updates, runs `sing-box check`, then applies data-plane changes with hot reload first and restart fallback when needed.
 
 Landing role writes a Shadowsocks inbound plus the endpoint secret stored under `/etc/relaypilot/endpoints/<name>.json`:
 
 ```bash
 relaypilot landing-install-ss
+
+# optional: expose a direct SOCKS5 landing for clients like sub2api
+relaypilot landing-install-socks
 ```
 
 After both roles are online, link them from the Hub. Hub fetches the landing endpoint over the protected control plane and queues a bind task to the transit, so normal Hub mode no longer requires copying endpoint JSON by hand.
@@ -144,7 +147,9 @@ Manual import remains available for standalone/lab use:
 relaypilot transit-import-bind
 ```
 
-The bind step imports endpoint state, creates/updates the Shadowsocks outbound, adds/updates the VLESS user, prepends `route.rules` with `auth_user -> outbound`, validates sing-box, and optionally restarts sing-box.
+The bind step imports endpoint state, creates/updates the Shadowsocks outbound, adds/updates the VLESS user, prepends `route.rules` with `auth_user -> outbound`, validates sing-box, then hot-reloads sing-box with restart fallback.
+
+If you do not need a transit hop and just want a direct client proxy on the landing host, `relaypilot landing-install-socks` writes a sing-box SOCKS5 inbound plus a reusable SOCKS endpoint JSON under `/etc/relaypilot/endpoints/<name>.json`.
 
 ## Hub 模式
 
@@ -349,7 +354,7 @@ relaypilot install-bot-service
 It long-polls Telegram `getUpdates`, runs `hub-dispatch`, sends one Hub reply,
 and inherits service CPU/RAM limits.
 
-Standalone/single-machine Telegram commands are still available for debugging:
+Standalone/single-machine Telegram commands are still available for debugging. After Hub binding, use `RelayPilot -> Hub 模式 -> Telegram -> 发送测试` to verify delivery from the menu:
 
 ```bash
 relaypilot bot setup
@@ -361,7 +366,7 @@ TG_DRY_RUN=1 relaypilot bot send "relaypilot test"
 
 On the Hub bot, send `/start` or `/relaypilot_panel` to open the Telegram
 control panel. The update center shows copyable Telegram code blocks such as
-`/relaypilot_update transit-hk v0.1.5 --restart`; buttons do not trigger
+`/relaypilot_update transit-hk v0.1.6 --restart`; buttons do not trigger
 high-risk update actions directly.
 
 Registered read-only commands:

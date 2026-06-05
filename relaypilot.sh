@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="${RELAYPILOT_VERSION:-0.1.5}"
+VERSION="${RELAYPILOT_VERSION:-0.1.6}"
 REPO="${REPO:-jiwen77/relaypilot}"
 RAW_REF="${RAW_REF:-main}"
 RAW_BASE="${RAW_BASE:-https://github.com/${REPO}/raw/${RAW_REF}}"
@@ -197,6 +197,7 @@ Usage:
   bash relaypilot.sh hub
   bash relaypilot.sh bot commands
   bash relaypilot.sh landing-install-ss
+  bash relaypilot.sh landing-install-socks
   bash relaypilot.sh transit-init-reality
   bash relaypilot.sh transit-import-bind
   bash relaypilot.sh hub-agent-export --agent-id hk-transit --role transit
@@ -215,6 +216,7 @@ Usage:
   bash relaypilot.sh agent enroll --bundle 'PASTE_BUNDLE'
   bash relaypilot.sh agent join
   bash relaypilot.sh agent ip-mode
+  bash relaypilot.sh agent remote-decommission enable|disable|status
   bash relaypilot.sh agent public-entry
   bash relaypilot.sh agent poll-once --enrollment-file /etc/relaypilot/agent-enrollment.json
   bash relaypilot.sh agent install-service --enrollment-file /etc/relaypilot/agent-enrollment.json
@@ -226,6 +228,8 @@ Usage:
   bash relaypilot.sh resource-profile
   bash relaypilot.sh services
   bash relaypilot.sh hub-remove-agent transit-hk --reason uninstalled
+  bash relaypilot.sh hub-dispatch "/decommission transit-hk --mode uninstall"
+  bash relaypilot.sh hub-dispatch "/decommission transit-hk --mode uninstall --confirm transit-hk"
   bash relaypilot.sh hub-alert-offline --dry-run
   bash relaypilot.sh hub-dispatch "/status all"
   bash relaypilot.sh hub-link transit-hk landing-hk [auth_user] [endpoint_name] [--mode direct|mesh]
@@ -233,7 +237,7 @@ Usage:
   bash relaypilot.sh bot register
   bash relaypilot.sh install
   bash relaypilot.sh update
-  bash relaypilot.sh update --version v0.1.5 --restart-services
+  bash relaypilot.sh update --version v0.1.6 --restart-services
   bash relaypilot.sh leave-hub  # remove Agent service/Hub credentials, keep Reality/SS/sing-box
   bash relaypilot.sh uninstall --dry-run
   bash relaypilot.sh uninstall --yes
@@ -399,10 +403,16 @@ select_option() {
 
 confirm() {
   local label="$1" default="${2:-y}" value
-  printf "%s [默认：%s%s%s]: " "$label" "$BOLD$CYAN" "$default" "$NC"
+  local hint="Y/n"
+  default="$(printf '%s' "$default" | tr '[:upper:]' '[:lower:]')"
+  [[ "$default" == "n" ]] && hint="y/N"
+  printf "%s [%s%s%s]: " "$label" "$BOLD$CYAN" "$hint" "$NC"
   read -r value || true
   value="${value:-$default}"
-  [[ "$value" =~ ^[Yy]$ ]]
+  case "$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')" in
+    y|yes) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 fetch() {
@@ -468,7 +478,7 @@ singbox_bin() {
 
 go_core_supports() {
   case "$1" in
-    generate-ss-password|migrate-state|tg-config|tg-status|tg-commands|tg-register-commands|tg-get-commands|tg-delete-commands|tg-dispatch|tg-send|render-landing-ss|ensure-transit-reality|validate-endpoint|render-outbound|import-endpoint|export-endpoint|public-entry-set|public-entry-list|bind-transit|list-endpoints|inspect-conf|hub-agent-export|hub-import-agent|hub-agents|hub-remove-agent|hub-removed-agents|hub-alert-offline|hub-alerts|hub-alert-callback|hub-recover-tasks|hub-issue-token|hub-init-tls|hub-issue-agent-cert|hub-provision-agent|hub-create-enroll-code|hub-enroll-code|agent-enroll|agent-set-ip-mode|hub-rotate-token|hub-revoke-token|hub-tokens|hub-dispatch|hub-tasks|hub-results|hub-daemon|bot-daemon|agent-poll-once|agent-poll-loop) return 0 ;;
+    generate-ss-password|migrate-state|tg-config|tg-status|tg-commands|tg-register-commands|tg-get-commands|tg-delete-commands|tg-dispatch|tg-send|render-landing-ss|render-landing-socks|ensure-transit-reality|validate-endpoint|render-outbound|import-endpoint|export-endpoint|public-entry-set|public-entry-list|bind-transit|list-endpoints|inspect-conf|hub-agent-export|hub-import-agent|hub-agents|hub-remove-agent|hub-removed-agents|hub-alert-offline|hub-alerts|hub-alert-callback|hub-recover-tasks|hub-issue-token|hub-init-tls|hub-issue-agent-cert|hub-provision-agent|hub-create-enroll-code|hub-enroll-code|agent-enroll|agent-set-ip-mode|hub-rotate-token|hub-revoke-token|hub-tokens|hub-dispatch|hub-tasks|hub-results|hub-export-client|hub-export-landing|hub-sync-agent|hub-sync-all|hub-daemon|bot-daemon|agent-poll-once|agent-poll-loop) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -613,14 +623,15 @@ prepare_service_profile() {
     if [[ "${RELAYPILOT_NONINTERACTIVE:-}" == "1" || "${RELAYPILOT_NO_ROOT:-}" == "1" || ! -t 0 ]]; then
       profile="$recommended"
     else
-      title "Service resource profile"
-      echo "Detected: RAM ${detected_mem:-0}MB, CPU ${detected_cpu}"
-      echo "1) ${recommended} (recommended): $(profile_description "$recommended")"
+      title "资源配置"
+      echo "检测：RAM ${detected_mem:-0}MB，CPU ${detected_cpu}"
+      echo "1) ${recommended}（推荐）：$(profile_description "$recommended")"
       echo "2) tiny: $(profile_description tiny)"
       echo "3) small: $(profile_description small)"
       echo "4) normal: $(profile_description normal)"
       echo "5) custom/env: $(profile_description custom)"
-      read -r -p "Choose profile [1]: " answer || true
+      printf "选择配置 [%s1%s]: " "$BOLD$CYAN" "$NC"
+      read -r answer || true
       case "${answer:-1}" in
         1|"") profile="$recommended" ;;
         2) profile=tiny ;;
@@ -1434,6 +1445,45 @@ landing_install_ss() {
   echo; title "复制给中转机导入的 endpoint JSON"; cat "$endpoint_file"
 }
 
+landing_install_socks() {
+  require_root
+  ensure_singbox || true
+  title "Landing agent: install SOCKS5 endpoint"
+  local name server listen listen_port server_port username password inbound_tag endpoint_tag endpoint_file detected_server=""
+  prompt name "落地名称/endpoint 名（英文数字短横线，例如 jp-direct）" "${LANDING_SOCKS_NAME:-landing-direct}"
+  if [[ -z "${LANDING_SOCKS_SERVER:-}" && -t 0 ]]; then
+    detected_server="$(detect_public_ip || true)"
+  fi
+  prompt server "客户端连接此落地的 IP/域名（空则用检测值）" "${LANDING_SOCKS_SERVER:-$detected_server}"
+  prompt listen "落地 sing-box 监听地址" "${LANDING_SOCKS_LISTEN:-::}"
+  prompt listen_port "落地 SOCKS5 监听端口" "${LANDING_SOCKS_PORT:-1080}"
+  prompt server_port "客户端连接端口（NAT 映射时可不同）" "${LANDING_SOCKS_SERVER_PORT:-$listen_port}"
+  prompt username "SOCKS 用户名（留空则不鉴权）" "${LANDING_SOCKS_USERNAME:-}"
+  prompt password "SOCKS 密码（留空则不鉴权）" "${LANDING_SOCKS_PASSWORD:-}"
+  prompt inbound_tag "落地 inbound tag（默认即可）" "${LANDING_SOCKS_INBOUND_TAG:-socks-in}"
+  prompt endpoint_tag "导出给中转的 outbound tag（默认即可）" "${LANDING_SOCKS_ENDPOINT_TAG:-landing-${name}-socks}"
+  mkdir -p "$STATE_DIR/endpoints"
+  endpoint_file="$STATE_DIR/endpoints/${name}.json"
+  backup_file_if_exists "$SINGBOX_CONFIG_PATH"
+  backup_file_if_exists "$endpoint_file"
+  core_cmd render-landing-socks \
+    --name "$name" --server "$server" --listen "$listen" \
+    --listen-port "$listen_port" --server-port "$server_port" \
+    --username "$username" --password "$password" \
+    --inbound-tag "$inbound_tag" --endpoint-tag "$endpoint_tag" \
+    --config-output "$SINGBOX_CONFIG_PATH" --endpoint-output "$endpoint_file"
+  info "落地配置已写入：$SINGBOX_CONFIG_PATH"
+  info "endpoint 已写入：$endpoint_file"
+  if [[ -n "$username" ]]; then
+    info "SOCKS5 连接信息：${server}:${server_port}（用户名：${username}）"
+  else
+    info "SOCKS5 连接信息：${server}:${server_port}（无鉴权）"
+  fi
+  service_check "$SINGBOX_CONFIG_PATH"
+  ensure_service_file "$SINGBOX_CONFIG_PATH"
+  if [[ "${NO_RESTART:-}" != "1" ]] && confirm "是否现在重启 $SERVICE_NAME" y; then service_restart "$SERVICE_NAME"; fi
+}
+
 transit_import_bind() {
   require_root
   title "Transit agent: import endpoint and bind auth_user"
@@ -1561,8 +1611,39 @@ tg_hub_daemon() {
 }
 
 hub_agents() { core_cmd hub-agents --state-dir "$STATE_DIR" "$@"; }
+hub_sync_agent() { local agent_id="${1:-}"; [[ -z "$agent_id" ]] && prompt agent_id "要刷新的 agent id" "${AGENT_ID:-}"; core_cmd hub-sync-agent --state-dir "$STATE_DIR" --agent-id "$agent_id"; }
+hub_sync_all() { core_cmd hub-sync-all --state-dir "$STATE_DIR"; }
+hub_export_client() { core_cmd hub-export-client --state-dir "$STATE_DIR" "$@"; }
+hub_export_landing() { core_cmd hub-export-landing --state-dir "$STATE_DIR" "$@"; }
 hub_remove_agent() { local agent_id="${1:-}"; [[ -z "$agent_id" ]] && prompt agent_id "要移除的 agent id" "${AGENT_ID:-}"; shift || true; core_cmd hub-remove-agent --state-dir "$STATE_DIR" "$@" "$agent_id"; }
 hub_removed_agents() { core_cmd hub-removed-agents --state-dir "$STATE_DIR" "$@"; }
+hub_decommission_agent() {
+  require_root
+  local agent_id="${1:-${AGENT_ID:-}}" mode="${DECOMMISSION_MODE:-uninstall}" action="${DECOMMISSION_ACTION:-preview}" text
+  [[ -z "$agent_id" ]] && prompt agent_id "要远程退役的 agent id" ""
+  select_option mode "退役模式" "$mode" \
+    "detach|退出 Hub 托管|删除接入凭证，保留代理配置" \
+    "purge-managed-proxy|清理托管代理配置|删除 RelayPilot 代理片段，保留程序" \
+    "uninstall|彻底卸载|删除 RelayPilot、状态和托管代理片段"
+  select_option action "执行方式" "$action" \
+    "preview|预览|只下发 dry-run，不删除节点文件" \
+    "execute|确认执行|节点需本机已开启远程退役授权"
+  text="/decommission ${agent_id} --mode ${mode}"
+  if [[ "$action" == "execute" ]]; then
+    title "远程退役节点"
+    printf "  目标：%s\n" "$agent_id"
+    printf "  模式：%s\n" "$mode"
+    printf "  要求：节点本机已开启远程退役授权。\n"
+    printf "  范围：只执行 RelayPilot 白名单退役动作，不执行任意 shell。\n"
+    echo
+    if ! confirm "确认远程退役该节点" n; then
+      info "已取消，未下发退役任务。"
+      return 0
+    fi
+    text+=" --confirm ${agent_id}"
+  fi
+  hub_dispatch "$text"
+}
 hub_alert_offline() { core_cmd hub-alert-offline --state-dir "$STATE_DIR" "$@"; }
 hub_alerts() { core_cmd hub-alerts --state-dir "$STATE_DIR" "$@"; }
 hub_recover_tasks() { core_cmd hub-recover-tasks --state-dir "$STATE_DIR" "$@"; }
@@ -1672,7 +1753,8 @@ select_hub_agent_by_role() {
     printf "%2d) %s · %s · %s\n" "$((idx + 1))" "$id" "$name" "$transport"
   done
   if [[ -n "$default" ]]; then
-    read -r -p "选择序号，或输入 agent id [$default]: " choice || true
+    printf "选择序号，或输入 agent id [%s%s%s]: " "$BOLD$CYAN" "$default" "$NC"
+    read -r choice || true
     choice="${choice:-$default}"
   else
     read -r -p "选择序号，或输入 agent id: " choice || true
@@ -1856,6 +1938,29 @@ install_tg_hub_service() {
   install_managed_service "$TG_SERVICE_NAME" "RelayPilot bot hub daemon" "$exec_cmd" "$TG_SERVICE_MEMORY_MAX" "$TG_SERVICE_CPU_QUOTA"
 }
 
+hub_telegram_quick_setup() {
+  require_root
+  if ! confirm "配置 Telegram 状态面板" n; then
+    return 0
+  fi
+  if ! tg_setup; then
+    warn "Telegram 配置未完成。"
+    return 0
+  fi
+  if FORCE_SERVICE_FILE=1 install_tg_hub_service; then
+    info "Telegram 服务已安装：${TG_SERVICE_NAME}"
+  else
+    warn "Telegram 服务安装失败。"
+  fi
+  if ! tg_register_hub_commands; then
+    warn "Telegram 命令注册失败，可稍后在 Hub → Telegram 中重试。"
+  fi
+  if confirm "启动 Telegram 服务" y; then
+    if ! service_action "$TG_SERVICE_NAME" restart; then
+      warn "${TG_SERVICE_NAME} 启动失败，请查看日志。"
+    fi
+  fi
+}
 
 install_alert_timer() {
   require_root
@@ -1995,8 +2100,8 @@ hub_quick_setup() {
   save_hub_public_config "$public_host_for_url" "$cert_host" "$port" "$listen_host"
   echo
   info "Hub URL 给 agent 使用：https://${public_host_for_url}:${port}"
-  info "下一步：在 Hub 菜单生成 agent invite；agent 端粘贴 invite 即可连接。"
-  if confirm "是否现在启动 ${HUB_SERVICE_NAME}" n; then
+  info "继续：在 Hub 菜单生成 agent invite；agent 端粘贴 invite 即可连接。"
+  if confirm "是否现在启动 ${HUB_SERVICE_NAME}" y; then
     if service_action "$HUB_SERVICE_NAME" restart; then
       if command -v systemctl >/dev/null 2>&1 && ! systemctl is-active --quiet "$HUB_SERVICE_NAME"; then
         warn "${HUB_SERVICE_NAME} 未处于 active 状态，请查看：journalctl -u ${HUB_SERVICE_NAME} -n 80 --no-pager"
@@ -2005,16 +2110,32 @@ hub_quick_setup() {
       warn "${HUB_SERVICE_NAME} 启动失败，请查看：journalctl -u ${HUB_SERVICE_NAME} -n 80 --no-pager"
     fi
   fi
+  hub_telegram_quick_setup
 }
 
 agent_join_wizard() {
   require_root
-  local invite role ip_mode ip_check_minutes ip_check_seconds
+  local invite="${AGENT_INVITE:-}" role ip_mode="${AGENT_IP_MODE:-static}" ip_check_minutes ip_check_seconds
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --invite|--enroll)
+        invite="$2"; shift 2 ;;
+      --ip-mode)
+        ip_mode="$2"; shift 2 ;;
+      --public-ip-interval)
+        ip_check_seconds="$2"; shift 2 ;;
+      *) err "未知参数：$1"; return 1 ;;
+    esac
+  done
   title "Agent 模式"
-  prompt invite "invite" "${AGENT_INVITE:-}"
+  if [[ -z "$invite" ]]; then
+    prompt invite "invite" ""
+  else
+    info "已读取 Hub invite。"
+  fi
   [[ -z "$invite" ]] && { warn "invite 为空。"; return 0; }
-  select_ip_mode ip_mode "${AGENT_IP_MODE:-static}"
-  ip_check_seconds="${AGENT_PUBLIC_IP_INTERVAL:-600}"
+  select_ip_mode ip_mode "$ip_mode"
+  ip_check_seconds="${ip_check_seconds:-${AGENT_PUBLIC_IP_INTERVAL:-600}}"
   if [[ "$ip_mode" == "dynamic" ]]; then
     ip_check_minutes="$(duration_to_minutes "${AGENT_IP_CHECK_MINUTES:-$(( ip_check_seconds / 60 ))}" 2>/dev/null || printf '10\n')"
     prompt ip_check_minutes "公网 IP 检测间隔（分钟）" "$ip_check_minutes"
@@ -2067,13 +2188,10 @@ agent_ip_mode_wizard() {
   require_root
   if [[ $# -gt 0 ]]; then
     core_cmd agent-set-ip-mode --state-dir "$STATE_DIR" "$@"
-    if service_unit_installed "$AGENT_SERVICE_NAME"; then
-      service_action "$AGENT_SERVICE_NAME" restart || warn "Agent 服务重启失败，请查看日志。"
-    fi
     return
   fi
   if [[ ! -f "${STATE_DIR}/agent-enrollment.json" ]]; then
-    warn "Agent 尚未连接 Hub。请先粘贴 invite。"
+    warn "Agent 尚未连接 Hub。请先接入 Hub。"
     return 0
   fi
   local current_mode ip_mode current_seconds ip_check_minutes ip_check_seconds
@@ -2095,10 +2213,7 @@ agent_ip_mode_wizard() {
     ip_check_seconds="$(( ip_check_minutes * 60 ))"
   fi
   core_cmd agent-set-ip-mode --state-dir "$STATE_DIR" --mode "$ip_mode" --public-ip-interval "$ip_check_seconds"
-  if service_unit_installed "$AGENT_SERVICE_NAME"; then
-    service_action "$AGENT_SERVICE_NAME" restart || warn "Agent 服务重启失败，请查看日志。"
-  fi
-  info "已更新 Agent IP 模式：$ip_mode"
+  info "已更新 Agent IP 模式：$ip_mode（下次轮询生效）"
 }
 
 show_agent_enrollment() {
@@ -2109,31 +2224,168 @@ show_agent_enrollment() {
   fi
 }
 
-agent_mode_menu() {
+agent_enrolled() {
+  [[ -f "${STATE_DIR}/agent-enrollment.json" ]]
+}
+
+agent_role_config_label() {
+  case "$(agent_enrollment_role)" in
+    transit) printf '中转节点' ;;
+    landing) printf '落地节点' ;;
+    *) printf '本机代理配置' ;;
+  esac
+}
+
+agent_role_config_menu() {
+  case "$(agent_enrollment_role)" in
+    transit) transit_menu ;;
+    landing) landing_menu ;;
+    *)
+      while true; do
+        menu_title "本机代理配置"
+        menu_item 1 "配置中转 Reality"
+        menu_item 2 "配置落地出口"
+        menu_back
+        menu_prompt choice "0-2"
+        case "${choice:-}" in
+          1) menu_action transit_init_reality ;;
+          2) landing_menu ;;
+          0) return 0 ;;
+          *) menu_invalid_choice ;;
+        esac
+      done
+      ;;
+  esac
+}
+
+agent_remote_decommission_enabled() {
+  local file="${STATE_DIR}/agent-policy.json"
+  [[ -f "$file" ]] || return 1
+  grep -Eq '"allow_remote_decommission"[[:space:]]*:[[:space:]]*true' "$file"
+}
+
+write_agent_remote_decommission_policy() {
+  local enabled="$1"
+  mkdir -p "$STATE_DIR"
+  if [[ "$enabled" == "1" ]]; then
+    cat > "${STATE_DIR}/agent-policy.json" <<'EOF_POLICY'
+{
+  "allow_remote_decommission": true
+}
+EOF_POLICY
+    chmod 0600 "${STATE_DIR}/agent-policy.json" 2>/dev/null || true
+  else
+    cat > "${STATE_DIR}/agent-policy.json" <<'EOF_POLICY'
+{
+  "allow_remote_decommission": false
+}
+EOF_POLICY
+    chmod 0600 "${STATE_DIR}/agent-policy.json" 2>/dev/null || true
+  fi
+}
+
+agent_remote_decommission_policy_menu() {
   require_root
   while true; do
-    menu_title "Agent 模式"
-    menu_item 1 "配置中转"
-    menu_item 2 "配置落地"
-    menu_item 3 "粘贴 invite"
-    menu_item 4 "接入信息"
-    menu_item 5 "IP 模式"
-    menu_item 6 "公网入口"
-    menu_item 7 "退出 Hub 托管（保留程序/代理）"
-    menu_item 8 "重置 Agent 和代理配置"
+    menu_title "远程退役授权"
+    if agent_remote_decommission_enabled; then
+      printf "  状态：已启用\n"
+    else
+      printf "  状态：未启用\n"
+    fi
+    printf "  用途：允许 Hub 下发白名单退役任务。\n"
+    printf "  范围：退出托管、清理 RelayPilot 代理片段、卸载 RelayPilot。\n"
+    echo
+    menu_item 1 "启用远程退役授权"
+    menu_item 2 "关闭远程退役授权"
     menu_back
-    menu_prompt choice "0-8"
+    menu_prompt choice "0-2"
     case "${choice:-}" in
-      1) transit_menu ;;
-      2) landing_menu ;;
-      3) menu_action agent_join_wizard ;;
-      4)
-        menu_action show_agent_enrollment
+      1)
+        if confirm "启用后 Hub 可远程退役本节点" n; then
+          write_agent_remote_decommission_policy 1
+          info "已启用远程退役授权。"
+        fi
         ;;
-      5) menu_action agent_ip_mode_wizard ;;
-      6) public_entry_menu ;;
-      7) menu_action reset_agent_control_menu_action ;;
-      8) menu_action reset_agent_menu_action ;;
+      2)
+        write_agent_remote_decommission_policy 0
+        info "已关闭远程退役授权。"
+        ;;
+      0) return 0 ;;
+      *) menu_invalid_choice ;;
+    esac
+  done
+}
+
+agent_advanced_menu() {
+  require_root
+  while true; do
+    menu_title "Agent 高级操作"
+    menu_item 1 "远程退役授权"
+    menu_item 2 "退出 Hub 托管"
+    menu_item 3 "重置 Agent"
+    menu_back
+    menu_prompt choice "0-3"
+    case "${choice:-}" in
+      1) agent_remote_decommission_policy_menu ;;
+      2) menu_action reset_agent_control_menu_action ;;
+      3) menu_action reset_agent_menu_action ;;
+      0) return 0 ;;
+      *) menu_invalid_choice ;;
+    esac
+  done
+}
+
+agent_unenrolled_menu() {
+  require_root
+  while ! agent_enrolled; do
+    menu_title "Agent 模式"
+    printf "  Agent 尚未接入 Hub。\n"
+    echo
+    menu_item 1 "接入 Hub"
+    menu_item 2 "配置中转 Reality"
+    menu_item 3 "配置落地出口"
+    menu_back
+    menu_prompt choice "0-3"
+    case "${choice:-}" in
+      1) menu_action agent_join_wizard ;;
+      2) menu_action transit_init_reality ;;
+      3) landing_menu ;;
+      0) return 0 ;;
+      *) menu_invalid_choice ;;
+    esac
+  done
+}
+
+agent_mode_menu() {
+  require_root
+  if ! agent_enrolled; then
+    agent_unenrolled_menu
+    agent_enrolled || return 0
+  fi
+  local role_label agent_id config_label
+  while true; do
+    role_label="$(agent_role_label)"
+    agent_id="$(agent_enrollment_value agent_id)"
+    config_label="$(agent_role_config_label)"
+    menu_title "Agent 模式"
+    printf "  Agent 已接入：%s · %s\n" "${agent_id:-unknown}" "${role_label:-Agent}"
+    echo
+    menu_item 1 "$config_label"
+    menu_item 2 "接入信息"
+    menu_item 3 "IP 模式"
+    menu_item 4 "公网入口"
+    menu_item 5 "Agent 服务"
+    menu_item 6 "高级操作"
+    menu_back
+    menu_prompt choice "0-6"
+    case "${choice:-}" in
+      1) agent_role_config_menu ;;
+      2) menu_action show_agent_enrollment ;;
+      3) menu_action agent_ip_mode_wizard ;;
+      4) public_entry_menu ;;
+      5) service_control_menu "$AGENT_SERVICE_NAME" "Agent 服务" ;;
+      6) agent_advanced_menu ;;
       0) return 0 ;;
       *) menu_invalid_choice ;;
     esac
@@ -2423,19 +2675,25 @@ services_menu() {
   done
 }
 
-hub_tasks_menu() {
+hub_advanced_menu() {
   require_root
   while true; do
-    menu_title "任务"
-    menu_item 1 "任务队列"
-    menu_item 2 "执行结果"
+    menu_title "Hub 高级操作"
+    menu_item 1 "初始化/修改 Hub 配置"
+    menu_item 2 "任务队列"
     menu_item 3 "恢复超时任务"
+    menu_item 4 "远程退役节点"
+    menu_item 5 "移除节点"
+    menu_item 6 "重置 Hub"
     menu_back
-    menu_prompt choice "0-3"
+    menu_prompt choice "0-6"
     case "${choice:-}" in
-      1) menu_action hub_tasks ;;
-      2) menu_action hub_results ;;
+      1) menu_action hub_quick_setup ;;
+      2) menu_action hub_tasks ;;
       3) menu_action hub_recover_tasks ;;
+      4) menu_action hub_decommission_agent ;;
+      5) menu_action hub_remove_agent ;;
+      6) menu_action reset_hub_menu_action ;;
       0) return 0 ;;
       *) menu_invalid_choice ;;
     esac
@@ -2450,13 +2708,15 @@ hub_telegram_menu() {
     menu_item 2 "安装服务"
     menu_item 3 "注册命令"
     menu_item 4 "命令列表"
+    menu_item 5 "发送测试"
     menu_back
-    menu_prompt choice "0-4"
+    menu_prompt choice "0-5"
     case "${choice:-}" in
       1) menu_action tg_setup ;;
       2) menu_action install_tg_hub_service ;;
       3) menu_action tg_register_hub_commands ;;
       4) menu_action tg_commands --hub ;;
+      5) menu_action tg_send ;;
       0) return 0 ;;
       *) menu_invalid_choice ;;
     esac
@@ -2482,33 +2742,94 @@ hub_alerts_menu() {
   done
 }
 
-hub_menu() {
+hub_agents_menu() {
   require_root
   while true; do
-    menu_title "Hub 模式"
-    menu_item 1 "初始化 Hub"
-    menu_item 2 "生成 invite"
-    menu_item 3 "Hub 状态"
-    menu_item 4 "节点列表"
-    menu_item 5 "串联节点"
-    menu_item 6 "Telegram"
-    menu_item 7 "任务"
-    menu_item 8 "离线告警"
-    menu_item 9 "移除节点"
-    menu_item 10 "重置 Hub 配置"
+    menu_title "节点列表"
+    menu_item 1 "查看节点"
+    menu_item 2 "刷新单个节点详情"
+    menu_item 3 "刷新全部节点详情"
     menu_back
-    menu_prompt choice "0-10"
+    menu_prompt choice "0-3"
+    case "${choice:-}" in
+      1) menu_action hub_agents ;;
+      2) menu_action hub_sync_agent ;;
+      3) menu_action hub_sync_all ;;
+      0) return 0 ;;
+      *) menu_invalid_choice ;;
+    esac
+  done
+}
+
+hub_tls_ready() {
+  [[ -f "$STATE_DIR/hub-tls/hub.crt" && -f "$STATE_DIR/hub-tls/hub.key" && -f "$STATE_DIR/hub-tls/ca.crt" ]]
+}
+
+hub_public_config_ready() {
+  local host port
+  host="$(hub_public_config_get HUB_PUBLIC_HOST 2>/dev/null || true)"
+  port="$(hub_public_config_get HUB_PUBLIC_PORT 2>/dev/null || true)"
+  [[ -n "$host" && -n "$port" ]]
+}
+
+hub_service_configured_for_state() {
+  local service_file="${SYSTEMD_DIR}/${HUB_SERVICE_NAME}.service"
+  [[ -f "$service_file" ]] || return 1
+  grep -q 'hub-daemon' "$service_file" || return 1
+  grep -q -- "--state-dir ${STATE_DIR}" "$service_file"
+}
+
+hub_initialized() {
+  hub_service_configured_for_state || { hub_tls_ready && hub_public_config_ready; }
+}
+
+hub_bootstrap_menu() {
+  require_root
+  while ! hub_initialized; do
+    menu_title "Hub 模式"
+    printf "  Hub 尚未初始化。\n"
+    echo
+    printf "  当前没有检测到可用的 Hub 配置，因此先不展示邀请码、串联、任务等二级操作。\n"
+    printf "  初始化会配置 Hub 对外地址、HTTPS/mTLS 证书，并安装 Hub 服务。\n"
+    echo
+    menu_item 1 "初始化 Hub"
+    menu_back
+    menu_prompt choice "0-1"
     case "${choice:-}" in
       1) menu_action hub_quick_setup ;;
-      2) menu_action hub_enroll_wizard ;;
+      0) return 0 ;;
+      *) menu_invalid_choice ;;
+    esac
+  done
+}
+
+hub_menu() {
+  require_root
+  if ! hub_initialized; then
+    hub_bootstrap_menu
+    hub_initialized || return 0
+  fi
+  while true; do
+    menu_title "Hub 模式"
+    menu_item 1 "生成邀请码"
+    menu_item 2 "串联节点"
+    menu_item 3 "Hub 状态"
+    menu_item 4 "节点列表"
+    menu_item 5 "Telegram"
+    menu_item 6 "最近操作"
+    menu_item 7 "离线告警"
+    menu_item 8 "高级操作"
+    menu_back
+    menu_prompt choice "0-8"
+    case "${choice:-}" in
+      1) menu_action hub_enroll_wizard ;;
+      2) menu_action hub_link_wizard ;;
       3) menu_action hub_dispatch "/status" ;;
-      4) menu_action hub_agents ;;
-      5) menu_action hub_link_wizard ;;
-      6) hub_telegram_menu ;;
-      7) hub_tasks_menu ;;
-      8) hub_alerts_menu ;;
-      9) menu_action hub_remove_agent ;;
-      10) menu_action reset_hub_menu_action ;;
+      4) hub_agents_menu ;;
+      5) hub_telegram_menu ;;
+      6) menu_action hub_results ;;
+      7) hub_alerts_menu ;;
+      8) hub_advanced_menu ;;
       0) return 0 ;;
       *) menu_invalid_choice ;;
     esac
@@ -2543,14 +2864,14 @@ landing_menu() {
   while true; do
     menu_title "落地节点"
     menu_item 1 "安装/更新 Shadowsocks"
-    menu_item 2 "状态检查"
-    menu_item 3 "Endpoints"
+    menu_item 2 "安装/更新 SOCKS5"
+    menu_item 3 "运行状态"
     menu_back
     menu_prompt choice "0-3"
     case "${choice:-}" in
       1) menu_action landing_install_ss ;;
-      2) menu_action status ;;
-      3) menu_action list_endpoints ;;
+      2) menu_action landing_install_socks ;;
+      3) menu_action status ;;
       0) return 0 ;;
       *) menu_invalid_choice ;;
     esac
@@ -2562,16 +2883,14 @@ transit_menu() {
   while true; do
     menu_title "中转节点"
     menu_item 1 "初始化/更新 Reality"
-    menu_item 2 "绑定落地 endpoint"
-    menu_item 3 "状态检查"
-    menu_item 4 "Endpoints"
+    menu_item 2 "绑定出口"
+    menu_item 3 "运行状态"
     menu_back
-    menu_prompt choice "0-4"
+    menu_prompt choice "0-3"
     case "${choice:-}" in
       1) menu_action transit_init_reality ;;
       2) menu_action transit_import_bind ;;
       3) menu_action status ;;
-      4) menu_action list_endpoints ;;
       0) return 0 ;;
       *) menu_invalid_choice ;;
     esac
@@ -2706,6 +3025,19 @@ main() {
       enroll) shift; agent_enroll "$@" ;;
       join) shift; agent_join_wizard "$@" ;;
       ip-mode|set-ip-mode) shift; agent_ip_mode_wizard "$@" ;;
+      remote-decommission|decommission-policy)
+        shift
+        require_root
+        case "${1:-menu}" in
+          enable) write_agent_remote_decommission_policy 1; info "已启用远程退役授权。" ;;
+          disable) write_agent_remote_decommission_policy 0; info "已关闭远程退役授权。" ;;
+          status)
+            if agent_remote_decommission_enabled; then info "远程退役授权：已启用"; else info "远程退役授权：未启用"; fi
+            ;;
+          menu|"") menu_session agent_remote_decommission_policy_menu ;;
+          *) err "未知远程退役授权命令：${1:-}"; exit 1 ;;
+        esac
+        ;;
       public-entry|entry) shift; menu_session public_entry_menu "$@" ;;
       poll-once) shift; agent_poll_once "$@" ;;
       poll|poll-loop) shift; agent_poll_loop "$@" ;;
@@ -2722,6 +3054,7 @@ main() {
     hub) menu_session hub_menu ;;
     telegram|tg) menu_session telegram_menu ;;
     landing-install-ss) landing_install_ss ;;
+    landing-install-socks) landing_install_socks ;;
     transit-init-reality|ensure-transit-reality) transit_init_reality ;;
     transit-import-bind) transit_import_bind ;;
     hub-agent-export) shift; core_cmd hub-agent-export --state-dir "$STATE_DIR" "$@" ;;
@@ -2745,6 +3078,7 @@ main() {
     install-bot-service) shift; install_tg_hub_service "$@" ;;
     hub-agents) shift; hub_agents "$@" ;;
     hub-remove-agent) shift; hub_remove_agent "${1:-}" "${@:2}" ;;
+    hub-decommission-agent|hub-retire-agent) shift; hub_decommission_agent "${1:-}" ;;
     hub-removed-agents) shift; hub_removed_agents "$@" ;;
     hub-alert-offline) shift; hub_alert_offline "$@" ;;
     hub-alerts) shift; hub_alerts "$@" ;;
@@ -2755,10 +3089,15 @@ main() {
     hub-dispatch) shift; hub_dispatch "${1:-}" ;;
     hub-tasks) shift; hub_tasks "$@" ;;
     hub-results) shift; hub_results "$@" ;;
+    hub-sync-agent) shift; hub_sync_agent "${1:-}" ;;
+    hub-sync-all) shift; hub_sync_all "$@" ;;
+    hub-export-client) shift; hub_export_client "$@" ;;
+    hub-export-landing) shift; hub_export_landing "$@" ;;
     agent-poll-once) shift; agent_poll_once "$@" ;;
     agent-poll-loop) shift; agent_poll_loop "$@" ;;
     generate-ss-password) shift; core_cmd generate-ss-password "$@" ;;
     render-landing-ss) shift; core_cmd render-landing-ss "$@" ;;
+    render-landing-socks) shift; core_cmd render-landing-socks "$@" ;;
     render-transit-reality|core-ensure-transit-reality) shift; core_cmd ensure-transit-reality --state-dir "$STATE_DIR" "$@" ;;
     validate-endpoint) shift; core_cmd validate-endpoint "$@" ;;
     render-outbound) shift; core_cmd render-outbound "$@" ;;

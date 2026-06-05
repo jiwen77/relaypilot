@@ -66,6 +66,12 @@ Then install the bounded Hub Telegram daemon:
 relaypilot install-bot-service
 ```
 
+After binding Telegram on the Hub, use the local menu to verify delivery:
+
+```text
+RelayPilot -> Hub 模式 -> Telegram -> 发送测试
+```
+
 The daemon long-polls Telegram `getUpdates`, sends command text to
 `hub-dispatch`, replies once with the queued targets, then sends one aggregate
 result after the selected agents report back. It is designed for small boxes:
@@ -83,7 +89,7 @@ For Hub mode, the useful runtime commands are:
 /relaypilot_status all
 /relaypilot_status transit
 /relaypilot_endpoints transit
-/relaypilot_update transit v0.1.5
+/relaypilot_update transit v0.1.6
 /relaypilot_results [batch_id]
 ```
 
@@ -117,11 +123,11 @@ Registered commands:
 Hub update commands:
 
 ```text
-/relaypilot_update hub v0.1.5
-/relaypilot_update transit v0.1.5
-/relaypilot_update landing v0.1.5
-/relaypilot_update all v0.1.5
-/relaypilot_update transit-hk v0.1.5 --restart
+/relaypilot_update hub v0.1.6
+/relaypilot_update transit v0.1.6
+/relaypilot_update landing v0.1.6
+/relaypilot_update all v0.1.6
+/relaypilot_update transit-hk v0.1.6 --restart
 ```
 
 Use an explicit tag for normal operations. `latest` is accepted, but is best kept

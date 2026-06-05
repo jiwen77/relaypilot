@@ -41,6 +41,27 @@ STATE_DIR="$ROOT/state" \
 SINGBOX_CONFIG_PATH="$ROOT/config.json" \
 bash ./relaypilot.sh landing-install-ss < "$ROOT/landing.in" > "$ROOT/landing.out" 2> "$ROOT/landing.err"
 
+cat > "$ROOT/landing-socks.in" <<'EOF_INPUT'
+la-direct
+198.51.100.20
+::
+1080
+2080
+sub2api
+secret-pass
+socks-in
+landing-la-direct-socks
+EOF_INPUT
+
+RELAYPILOT_NO_ROOT=1 \
+SKIP_SINGBOX_INSTALL=1 \
+NO_RESTART=1 \
+PATH="$ROOT/bin:$PATH" \
+RELAYPILOT_STUB_LOG="$ROOT/stub.log" \
+STATE_DIR="$ROOT/socks-state" \
+SINGBOX_CONFIG_PATH="$ROOT/socks-config.json" \
+bash ./relaypilot.sh landing-install-socks < "$ROOT/landing-socks.in" > "$ROOT/landing-socks.out" 2> "$ROOT/landing-socks.err"
+
 cat > "$ROOT/transit-init.in" <<EOF_INPUT
 $ROOT/transit-conf
 ::
@@ -131,6 +152,14 @@ printf '4\n0\n0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
   bash ./relaypilot.sh > "$ROOT/uninstall-menu.out"
 printf '0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
   bash ./relaypilot.sh agent > "$ROOT/agent-direct-menu.out"
+printf '2\n0\n0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/ip-state" \
+  bash ./relaypilot.sh > "$ROOT/agent-menu-connected.out"
+printf '2\n6\n0\n0\n0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/ip-state" \
+  bash ./relaypilot.sh > "$ROOT/agent-advanced-menu.out"
+printf '0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/ip-state" \
+  bash ./relaypilot.sh agent > "$ROOT/agent-direct-connected.out"
+printf '0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
+  bash ./relaypilot.sh landing > "$ROOT/landing-menu.out"
 printf '0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
   bash ./relaypilot.sh transit > "$ROOT/transit-menu.out"
 
@@ -168,6 +197,14 @@ RELAYPILOT_NO_ROOT=1 \
 HUB_PUBLIC_HOST="https://hub.quick.example:9443" \
 RELAYPILOT_PROFILE=tiny \
 bash ./relaypilot.sh hub-quick-setup > "$ROOT/hub-quick.out" 2> "$ROOT/hub-quick.err"
+printf '1\n0\n0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/quick-hub" \
+  bash ./relaypilot.sh > "$ROOT/hub-menu-ready.out"
+printf '1\n4\n0\n0\n0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/quick-hub" \
+  bash ./relaypilot.sh > "$ROOT/hub-agents-menu.out"
+printf '1\n8\n0\n0\n0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/quick-hub" \
+  bash ./relaypilot.sh > "$ROOT/hub-advanced-menu.out"
+printf '1\n5\n0\n0\n0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/quick-hub" \
+  bash ./relaypilot.sh > "$ROOT/hub-telegram-menu.out"
 printf '\nstored-transit\n\n\n10m\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/quick-hub" \
   bash ./relaypilot.sh hub-enroll > "$ROOT/hub-enroll-stored-default.out" 2>&1
 rm -f "$ROOT/quick-hub/hub-public.env"
@@ -272,27 +309,62 @@ grep -q 'Hub：○ 未启用.*Agent：○ 未启用.*代理：○ 未启用' "$R
 grep -q 'Hub 模式' "$ROOT/agent-menu.out"
 grep -q 'Agent 模式' "$ROOT/agent-menu.out"
 grep -q '卸载 RelayPilot' "$ROOT/agent-menu.out"
-grep -q '退出 Hub 托管（保留程序/代理）' "$ROOT/agent-menu.out"
-grep -q '重置 Agent 和代理配置' "$ROOT/agent-menu.out"
-grep -q 'IP 模式' "$ROOT/agent-menu.out"
-grep -q '重置 Hub 配置' "$ROOT/hub-menu.out"
 grep -q '卸载 RelayPilot（保留状态/代理）' "$ROOT/uninstall-menu.out"
 grep -q '彻底卸载（含状态/代理）' "$ROOT/uninstall-menu.out"
-grep -q '配置中转' "$ROOT/agent-menu.out"
-grep -q '配置落地' "$ROOT/agent-menu.out"
-grep -q '粘贴 invite' "$ROOT/agent-menu.out"
-grep -q '公网入口' "$ROOT/agent-menu.out"
+grep -q 'Agent 尚未接入 Hub' "$ROOT/agent-menu.out"
+grep -q '接入 Hub' "$ROOT/agent-menu.out"
+grep -q '配置中转 Reality' "$ROOT/agent-menu.out"
+grep -q '配置落地出口' "$ROOT/agent-menu.out"
+if grep -q '接入信息' "$ROOT/agent-menu.out" || grep -q '退出 Hub 托管' "$ROOT/agent-menu.out" || grep -q '重置 Agent' "$ROOT/agent-menu.out"; then
+  echo "unenrolled Agent mode should hide connected-only and destructive actions" >&2
+  exit 1
+fi
+grep -q 'Agent 已接入：transit-hk · 中转' "$ROOT/agent-menu-connected.out"
+grep -q '中转节点' "$ROOT/agent-menu-connected.out"
+grep -q '接入信息' "$ROOT/agent-menu-connected.out"
+grep -q 'IP 模式' "$ROOT/agent-menu-connected.out"
+grep -q '公网入口' "$ROOT/agent-menu-connected.out"
+grep -q '高级操作' "$ROOT/agent-menu-connected.out"
+if grep -q '退出 Hub 托管' "$ROOT/agent-menu-connected.out" || grep -q '重置 Agent' "$ROOT/agent-menu-connected.out"; then
+  echo "connected Agent mode should keep destructive actions under Advanced" >&2
+  exit 1
+fi
+grep -q 'Hub 尚未初始化' "$ROOT/hub-menu.out"
+grep -q '初始化 Hub' "$ROOT/hub-menu.out"
+if grep -q '生成邀请码' "$ROOT/hub-menu.out" || grep -q '串联节点' "$ROOT/hub-menu.out"; then
+  echo "uninitialized Hub mode should only offer initialization/back, not operational actions" >&2
+  exit 1
+fi
 grep -q '"ip_mode": "dynamic"' "$ROOT/ip-state/agent-enrollment.json"
 grep -q '"public_ip_interval_seconds": 1800' "$ROOT/ip-state/agent-enrollment.json"
 grep -q '"host": "front.example"' "$ROOT/state/public-entries.json"
 grep -q '"public_port": 51820' "$ROOT/state/public-entries.json"
 grep -q 'shadowsocks.*hk.*front.example:443' "$ROOT/public-entry-list.out"
 grep -q 'wireguard.*hk.*front.example:51820' "$ROOT/public-entry-list.out"
-grep -q 'Hub 模式' "$ROOT/hub-menu.out"
-grep -q '初始化 Hub' "$ROOT/hub-menu.out"
-grep -q '生成 invite' "$ROOT/hub-menu.out"
-grep -q '串联节点' "$ROOT/hub-menu.out"
-grep -q 'Telegram' "$ROOT/hub-menu.out"
+grep -q 'Hub 模式' "$ROOT/hub-menu-ready.out"
+grep -q '生成邀请码' "$ROOT/hub-menu-ready.out"
+grep -q '串联节点' "$ROOT/hub-menu-ready.out"
+grep -q '最近操作' "$ROOT/hub-menu-ready.out"
+grep -q 'Telegram' "$ROOT/hub-menu-ready.out"
+grep -q '高级操作' "$ROOT/hub-menu-ready.out"
+if grep -q '任务队列' "$ROOT/hub-menu-ready.out" || grep -q '恢复超时任务' "$ROOT/hub-menu-ready.out" || grep -q '重置 Hub' "$ROOT/hub-menu-ready.out"; then
+  echo "Hub main menu should expose results, not raw task internals" >&2
+  exit 1
+fi
+grep -q 'Hub 高级操作' "$ROOT/hub-advanced-menu.out"
+grep -q '初始化/修改 Hub 配置' "$ROOT/hub-advanced-menu.out"
+grep -q '任务队列' "$ROOT/hub-advanced-menu.out"
+grep -q '恢复超时任务' "$ROOT/hub-advanced-menu.out"
+grep -q '远程退役节点' "$ROOT/hub-advanced-menu.out"
+grep -q '重置 Hub' "$ROOT/hub-advanced-menu.out"
+grep -q '发送测试' "$ROOT/hub-telegram-menu.out"
+grep -q 'Agent 高级操作' "$ROOT/agent-advanced-menu.out"
+grep -q '远程退役授权' "$ROOT/agent-advanced-menu.out"
+grep -q '退出 Hub 托管' "$ROOT/agent-advanced-menu.out"
+grep -q '重置 Agent' "$ROOT/agent-advanced-menu.out"
+grep -q '节点列表' "$ROOT/hub-agents-menu.out"
+grep -q '刷新单个节点详情' "$ROOT/hub-agents-menu.out"
+grep -q '刷新全部节点详情' "$ROOT/hub-agents-menu.out"
 grep -q '本机服务' "$ROOT/service-menu.out"
 grep -q '状态 / 启动' "$ROOT/service-menu.out"
 grep -q '资源限制' "$ROOT/service-menu.out"
@@ -304,11 +376,25 @@ if grep -q '清除失败状态' "$ROOT/hub-service-menu.out"; then
   exit 1
 fi
 grep -q 'Agent 模式' "$ROOT/agent-direct-menu.out"
-grep -q '配置中转' "$ROOT/agent-direct-menu.out"
+grep -q 'Agent 尚未接入 Hub' "$ROOT/agent-direct-menu.out"
+grep -q '配置中转 Reality' "$ROOT/agent-direct-menu.out"
+grep -q 'Agent 模式' "$ROOT/agent-direct-connected.out"
+grep -q 'Agent 已接入：transit-hk · 中转' "$ROOT/agent-direct-connected.out"
+grep -q '中转节点' "$ROOT/agent-direct-connected.out"
+grep -q '安装/更新 SOCKS5' "$ROOT/landing-menu.out"
+grep -q '运行状态' "$ROOT/landing-menu.out"
+if grep -q 'Endpoints' "$ROOT/landing-menu.out"; then
+  echo "landing menu should not expose debug-only Endpoints entry" >&2
+  exit 1
+fi
 grep -q '初始化/更新 Reality' "$ROOT/transit-menu.out"
-grep -q '绑定落地 endpoint' "$ROOT/transit-menu.out"
+grep -q '绑定出口' "$ROOT/transit-menu.out"
+grep -q '运行状态' "$ROOT/transit-menu.out"
+if grep -q 'Endpoints' "$ROOT/transit-menu.out"; then
+  echo "transit menu should not expose debug-only Endpoints entry" >&2
+  exit 1
+fi
 ! grep -q 'Advanced' "$ROOT/hub-menu.out"
-! grep -q '接入 Hub' "$ROOT/agent-menu.out"
 ! grep -q '不会 fanout' "$ROOT/hub-menu.out"
 
 grep -q 'smoke-interactive' "$ROOT/hub-enroll.out"
@@ -344,6 +430,8 @@ grep -q '未写入任何 Hub 配置' "$ROOT/hub-quick-cancel.out"
 grep -q 'Hub 配置预览' "$ROOT/hub-quick.out"
 grep -q 'Hub URL 给 agent 使用：https://hub.quick.example:9443' "$ROOT/hub-quick.out"
 grep -q '证书 SAN 包含：hub.quick.example' "$ROOT/hub-quick.out"
+grep -q '是否现在启动 relaypilot-hub \[Y/n\]' "$ROOT/hub-quick.out"
+grep -q '配置 Telegram 状态面板 \[y/N\]' "$ROOT/hub-quick.out"
 grep -q 'Hub URL： https://hub.quick.example:9443' "$ROOT/hub-enroll-stored-default.out"
 grep -q '默认：' "$ROOT/hub-enroll-stored-default.out"
 grep -q 'Hub：https://hub.quick.example:9443' "$ROOT/hub-enroll-stored-default.out"
@@ -412,6 +500,38 @@ INSTALL_DIR="$ROOT/relay-installer" \
 BIN_PATH="$ROOT/bin/relaypilot-installed" \
 RELAYPILOT_NO_ROOT=1 \
 bash ./install-relaypilot.sh > "$ROOT/installer-noninteractive.out" 2> "$ROOT/installer-noninteractive.err"
+
+mkdir -p "$ROOT/raw-enroll" "$ROOT/release-enroll/v-local"
+cat > "$ROOT/raw-enroll/relaypilot.sh" <<'EOF_STUB_ENTRYPOINT'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${RELAYPILOT_INSTALL_DISPATCH_LOG:?}"
+EOF_STUB_ENTRYPOINT
+chmod +x "$ROOT/raw-enroll/relaypilot.sh"
+cat > "$ROOT/release-enroll/v-local/relaypilot_linux_amd64" <<'EOF_STUB_CORE'
+#!/usr/bin/env bash
+exit 0
+EOF_STUB_CORE
+chmod +x "$ROOT/release-enroll/v-local/relaypilot_linux_amd64"
+(cd "$ROOT/release-enroll/v-local" && sha256sum relaypilot_linux_amd64 > relaypilot_linux_amd64.sha256)
+RAW_BASE="file://$ROOT/raw-enroll" \
+RELEASE_BASE="file://$ROOT/release-enroll" \
+VERSION="v-local" \
+INSTALL_DIR="$ROOT/relay-installer-enroll-auto" \
+BIN_PATH="$ROOT/bin/relaypilot-enroll-auto" \
+RELAYPILOT_NO_ROOT=1 \
+RELAYPILOT_INSTALL_DISPATCH_LOG="$ROOT/install-enroll-auto.log" \
+RELAYPILOT_INSTALL_ENROLL_MODE=auto \
+bash ./install-relaypilot.sh --enroll 'INVITE_SMOKE' > "$ROOT/installer-enroll-auto.out" 2> "$ROOT/installer-enroll-auto.err"
+RAW_BASE="file://$ROOT/raw-enroll" \
+RELEASE_BASE="file://$ROOT/release-enroll" \
+VERSION="v-local" \
+INSTALL_DIR="$ROOT/relay-installer-enroll-join" \
+BIN_PATH="$ROOT/bin/relaypilot-enroll-join" \
+RELAYPILOT_NO_ROOT=1 \
+RELAYPILOT_INSTALL_DISPATCH_LOG="$ROOT/install-enroll-join.log" \
+RELAYPILOT_INSTALL_ENROLL_MODE=join \
+bash ./install-relaypilot.sh --enroll 'INVITE_SMOKE' > "$ROOT/installer-enroll-join.out" 2> "$ROOT/installer-enroll-join.err"
+
 printf '0\n' | RAW_BASE="file://$ROOT/raw" \
 RELEASE_BASE="file://$ROOT/release" \
 VERSION="v-local" \
@@ -430,6 +550,8 @@ grep -q '已更新 RelayPilot' "$ROOT/update.out"
 [[ -L "$ROOT/bin/relaypilot-updated" || -x "$ROOT/bin/relaypilot-updated" ]]
 grep -q 'Installed entrypoint' "$ROOT/installer-noninteractive.out"
 ! grep -q '^RelayPilot$' "$ROOT/installer-noninteractive.out"
+grep -q '^agent enroll --invite INVITE_SMOKE --install-service$' "$ROOT/install-enroll-auto.log"
+grep -q '^agent join --invite INVITE_SMOKE$' "$ROOT/install-enroll-join.log"
 grep -q 'RelayPilot' "$ROOT/installer-menu.out"
 grep -q 'Hub 模式' "$ROOT/installer-menu.out"
 [[ -x "$ROOT/install-dir/relaypilot.sh" ]]
@@ -448,6 +570,10 @@ bash ./relaypilot.sh uninstall --yes > "$ROOT/uninstall.out" 2> "$ROOT/uninstall
 [[ -f "$ROOT/config.json" ]]
 grep -q '"protocol": "shadowsocks"' "$ROOT/state/endpoints/hk.json"
 grep -q '"tag": "landing-hk-ss"' "$ROOT/state/endpoints/hk.json"
+[[ -f "$ROOT/socks-config.json" ]]
+grep -q '"type": "socks"' "$ROOT/socks-config.json"
+grep -q '"protocol": "socks"' "$ROOT/socks-state/endpoints/la-direct.json"
+grep -q '"tag": "landing-la-direct-socks"' "$ROOT/socks-state/endpoints/la-direct.json"
 grep -q '44444444-4444-4444-8444-444444444444' "$ROOT/transit-conf/00-relaypilot-reality.json"
 grep -q '"private_key"' "$ROOT/transit-conf/00-relaypilot-reality.json"
 grep -q '0123456789abcdef' "$ROOT/transit-conf/00-relaypilot-reality.json"

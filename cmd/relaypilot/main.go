@@ -46,6 +46,7 @@ const (
 	hubRemovedAgentsName           = "hub-removed-agents.json"
 	hubAlertsName                  = "hub-alerts.json"
 	hubTasksDirName                = "hub-tasks"
+	hubExportsDirName              = "hub-exports"
 	hubAgentTokensName             = "hub-agent-tokens.json"
 	hubAuthNoncesName              = "hub-auth-nonces.json"
 	hubEnrollCodesName             = "hub-enroll-codes.json"
@@ -55,6 +56,7 @@ const (
 	hubTLSServerCertName           = "hub.crt"
 	hubTLSServerKeyName            = "hub.key"
 	agentEnrollmentName            = "agent-enrollment.json"
+	agentPolicyName                = "agent-policy.json"
 	publicEntriesName              = "public-entries.json"
 	defaultStateDir                = "/etc/relaypilot"
 	defaultConfDir                 = "/etc/sing-box/conf"
@@ -63,6 +65,8 @@ const (
 	defaultEnrollCodeTTLSeconds    = 600
 	defaultPublicIPIntervalSeconds = 600
 	defaultPublicIPProbeTimeout    = 3 * time.Second
+	defaultLinkProbeTimeoutSeconds = 3
+	maxLinkProbeTimeoutSeconds     = 5
 	agentAuthSkewSeconds           = 300
 	heartbeatStaleSeconds          = 120
 	heartbeatOfflineSeconds        = 600
@@ -80,6 +84,7 @@ const (
 	defaultTaskMaxLeaseCount       = 3
 	defaultMeshConfigDir           = "/etc/wireguard"
 	defaultMeshKeepaliveSeconds    = 25
+	defaultSyncStaleSeconds        = 21600
 	wireGuardConfigMarker          = "# RelayPilot managed WireGuard mesh"
 )
 
@@ -136,7 +141,9 @@ var hubTelegramCommandRows = []obj{
 	{"command": "relaypilot_show_endpoint", "args": "<agent_id> <endpoint_name>", "description": "Queue endpoint detail request for one agent", "scope": "read"},
 	{"command": "relaypilot_inspect_conf", "args": "<agent_id> [path]", "description": "Queue config inspection for one agent", "scope": "read"},
 	{"command": "relaypilot_link", "args": "<transit_id> <landing_id> [auth_user] [endpoint_name] [--mode direct|mesh]", "description": "Link one transit to one landing endpoint", "scope": "write"},
+	{"command": "relaypilot_probe", "args": "<transit_id> <landing_id> [endpoint_name] [--timeout seconds]", "description": "Run one on-demand low-resource TCP link probe", "scope": "read"},
 	{"command": "relaypilot_update", "args": "<hub|all|transit|landing|agent_id> <version|latest> [--restart]", "description": "Update Hub or queue node self-update tasks", "scope": "write"},
+	{"command": "relaypilot_decommission", "args": "<agent_id> [--mode detach|purge-managed-proxy|uninstall] [--confirm agent_id]", "description": "Queue remote agent retirement; dry-run unless exact confirm is provided", "scope": "write"},
 	{"command": "relaypilot_tasks", "args": "", "description": "List queued hub tasks", "scope": "read"},
 	{"command": "relaypilot_results", "args": "[batch_id]", "description": "Show completed hub task results", "scope": "read"},
 	{"command": "relaypilot_alerts", "args": "", "description": "List offline-node alerts", "scope": "read"},
@@ -312,6 +319,37 @@ func run(args []string) error {
 			*serverPort = *listenPort
 		}
 		endpoint, config, err := renderLandingSS(*name, *server, *listen, *listenPort, *serverPort, *method, *password, *network, *inboundTag, *endpointTag)
+		if err != nil {
+			return err
+		}
+		if *configOutput == "" || *endpointOutput == "" {
+			return errors.New("--config-output and --endpoint-output are required")
+		}
+		if err := writeJSON(*configOutput, config, 0o644); err != nil {
+			return err
+		}
+		if err := writeJSON(*endpointOutput, endpoint, 0o600); err != nil {
+			return err
+		}
+		return printJSON(obj{"config": *configOutput, "endpoint": *endpointOutput, "endpoint_name": endpoint["name"], "endpoint_tag": endpoint["tag"]})
+	case "render-landing-socks":
+		fs := flag.NewFlagSet(args[0], flag.ExitOnError)
+		name := fs.String("name", "", "endpoint name")
+		server := fs.String("server", "", "client-visible server")
+		listen := fs.String("listen", "::", "listen address")
+		listenPort := fs.Int("listen-port", 0, "listen port")
+		serverPort := fs.Int("server-port", 0, "server port")
+		username := fs.String("username", "", "SOCKS username")
+		password := fs.String("password", "", "SOCKS password")
+		inboundTag := fs.String("inbound-tag", "socks-in", "inbound tag")
+		endpointTag := fs.String("endpoint-tag", "", "endpoint/outbound tag")
+		configOutput := fs.String("config-output", "", "config output path")
+		endpointOutput := fs.String("endpoint-output", "", "endpoint output path")
+		_ = fs.Parse(args[1:])
+		if *serverPort == 0 {
+			*serverPort = *listenPort
+		}
+		endpoint, config, err := renderLandingSOCKS(*name, *server, *listen, *listenPort, *serverPort, *username, *password, *inboundTag, *endpointTag)
 		if err != nil {
 			return err
 		}
@@ -754,6 +792,53 @@ func run(args []string) error {
 		}
 		fmt.Println(formatHubTaskResultsText(tasks, *batchID))
 		return nil
+	case "hub-export-client":
+		fs := flag.NewFlagSet(args[0], flag.ExitOnError)
+		stateDir := fs.String("state-dir", defaultStateDir, "state directory")
+		transitID := fs.String("transit-id", "", "transit agent id")
+		authUser := fs.String("auth-user", "", "linked auth_user")
+		format := fs.String("format", "remnawave", "output format: remnawave or json")
+		_ = fs.Parse(args[1:])
+		exported, err := hubExportTransitClient(*stateDir, *transitID, *authUser)
+		if err != nil {
+			return err
+		}
+		switch strings.ToLower(strings.TrimSpace(*format)) {
+		case "", "remnawave", "json":
+			return printJSON(exported)
+		default:
+			return fmt.Errorf("unsupported export format: %s", *format)
+		}
+	case "hub-export-landing":
+		fs := flag.NewFlagSet(args[0], flag.ExitOnError)
+		stateDir := fs.String("state-dir", defaultStateDir, "state directory")
+		landingID := fs.String("landing-id", "", "landing agent id")
+		endpointName := fs.String("endpoint-name", "", "landing endpoint name")
+		_ = fs.Parse(args[1:])
+		exported, err := hubExportLandingConfig(*stateDir, *landingID, *endpointName)
+		if err != nil {
+			return err
+		}
+		return printJSON(exported)
+	case "hub-sync-agent":
+		fs := flag.NewFlagSet(args[0], flag.ExitOnError)
+		stateDir := fs.String("state-dir", defaultStateDir, "state directory")
+		agentID := fs.String("agent-id", "", "agent id")
+		_ = fs.Parse(args[1:])
+		res, err := hubSyncAgent(*stateDir, *agentID)
+		if err != nil {
+			return err
+		}
+		return printJSON(res)
+	case "hub-sync-all":
+		fs := flag.NewFlagSet(args[0], flag.ExitOnError)
+		stateDir := fs.String("state-dir", defaultStateDir, "state directory")
+		_ = fs.Parse(args[1:])
+		res, err := hubSyncAll(*stateDir)
+		if err != nil {
+			return err
+		}
+		return printJSON(res)
 	case "hub-alert-offline":
 		fs := flag.NewFlagSet(args[0], flag.ExitOnError)
 		stateDir := fs.String("state-dir", defaultStateDir, "state directory")
@@ -900,6 +985,13 @@ func run(args []string) error {
 		if _, err := parseLabels(*labels); err != nil {
 			return err
 		}
+		if *enrollmentFile != "" &&
+			*hubURL == "" && *agentID == "" && *role == "" &&
+			*token == "" && *tokenFile == "" &&
+			*caCert == "" && *clientCert == "" && *clientKey == "" && *tlsServerName == "" &&
+			*ipMode == "" && *publicIPInterval == 0 {
+			return agentPollLoopWithEnrollmentFile(*enrollmentFile, *stateDir, *conf, *interval, *maxTasks, time.Duration(*timeout)*time.Second, *topologyInterval)
+		}
 		if err := applyAgentEnrollmentDefaults(*enrollmentFile, hubURL, agentID, role, tokenFile, caCert, clientCert, clientKey, ipMode, publicIPInterval); err != nil {
 			return err
 		}
@@ -1043,6 +1135,7 @@ Commands:
   tg-dispatch --text "/status" [--state-dir DIR] [--hub]
   tg-send --text TEXT [--state-dir DIR] [--dry-run]
   render-landing-ss --name NAME --server HOST --listen-port PORT --config-output PATH --endpoint-output PATH
+  render-landing-socks --name NAME --server HOST --listen-port PORT --config-output PATH --endpoint-output PATH
   validate-endpoint ENDPOINT_JSON
   render-outbound ENDPOINT_JSON
   import-endpoint [--state-dir DIR] ENDPOINT_JSON
@@ -1064,9 +1157,15 @@ Commands:
   hub-create-enroll-code [--state-dir DIR] [--hub-url https://HUB:8443 | --public-host HOST] --agent-id ID --role transit|landing [--port 8443] [--ttl 10m] [--text]
   hub-dispatch [--state-dir DIR] --text "/status all"
   hub-dispatch [--state-dir DIR] --text "/link transit-hk landing-hk [auth_user] [endpoint_name] [--mode direct|mesh]"
+  hub-dispatch [--state-dir DIR] --text "/probe transit-hk landing-hk [endpoint_name] [--timeout 3]"
   hub-dispatch [--state-dir DIR] --text "/update <hub|all|transit|landing|agent_id> <version|latest> [--restart]"
+  hub-dispatch [--state-dir DIR] --text "/decommission <agent_id> [--mode detach|purge-managed-proxy|uninstall] [--confirm agent_id]"
   hub-tasks [--state-dir DIR] [--json]
   hub-results [--state-dir DIR] [--batch-id ID] [--json]
+  hub-export-client [--state-dir DIR] --transit-id ID [--auth-user USER] [--format remnawave|json]
+  hub-export-landing [--state-dir DIR] --landing-id ID [--endpoint-name NAME]
+  hub-sync-agent [--state-dir DIR] --agent-id ID
+  hub-sync-all [--state-dir DIR]
   hub-alert-offline [--state-dir DIR] [--dry-run]
   hub-alerts [--state-dir DIR] [--json]
   hub-alert-callback [--state-dir DIR] --data rp:obs:TOKEN
@@ -1305,6 +1404,8 @@ func hubRemovedAgentsPath(stateDir string) string {
 	return filepath.Join(stateDir, hubRemovedAgentsName)
 }
 func hubTasksDir(stateDir string) string        { return filepath.Join(stateDir, hubTasksDirName) }
+func hubExportsDir(stateDir string) string      { return filepath.Join(stateDir, hubExportsDirName) }
+func agentPolicyPath(stateDir string) string    { return filepath.Join(stateDir, agentPolicyName) }
 func hubAgentTokensPath(stateDir string) string { return filepath.Join(stateDir, hubAgentTokensName) }
 func hubAuthNoncesPath(stateDir string) string  { return filepath.Join(stateDir, hubAuthNoncesName) }
 func hubEnrollCodesPath(stateDir string) string { return filepath.Join(stateDir, hubEnrollCodesName) }
@@ -3003,6 +3104,329 @@ func summarizeAgent(agent obj) obj {
 	return out
 }
 
+func findHubAgentByID(agents []obj, agentID string) (obj, error) {
+	for _, agent := range agents {
+		if str(agent["id"]) == agentID {
+			return agent, nil
+		}
+	}
+	return nil, fmt.Errorf("agent not found: %s", agentID)
+}
+
+func findPublicEntryForAgent(agent obj, use, endpointName string) obj {
+	entries := asList(asObj(agent["network"])["public_entries"])
+	for _, raw := range entries {
+		entry := asObj(raw)
+		if str(entry["use"]) != use {
+			continue
+		}
+		if endpointName == "" || str(entry["name"]) == endpointName {
+			return entry
+		}
+	}
+	return nil
+}
+
+func firstTransitRealityInbound(agent obj) obj {
+	for _, raw := range asList(asObj(agent["topology"])["inbounds"]) {
+		inbound := asObj(raw)
+		if str(inbound["type"]) == "vless" {
+			return inbound
+		}
+	}
+	return nil
+}
+
+func transitRealityClientMaterial(agent obj, authUser string) (obj, error) {
+	reality := asObj(asObj(agent["topology"])["reality_client"])
+	if len(reality) == 0 {
+		return nil, errors.New("transit reality client material is unavailable; agent must report reality client fields")
+	}
+	inbound := firstTransitRealityInbound(agent)
+	if len(inbound) == 0 {
+		return nil, errors.New("transit inbound snapshot is unavailable")
+	}
+	var selectedUser obj
+	users := asList(inbound["users"])
+	if authUser != "" {
+		for _, raw := range users {
+			user := asObj(raw)
+			if str(user["name"]) == authUser {
+				selectedUser = user
+				break
+			}
+		}
+		if len(selectedUser) == 0 {
+			return nil, fmt.Errorf("auth_user not found on transit inbound: %s", authUser)
+		}
+	} else if len(users) == 1 {
+		selectedUser = asObj(users[0])
+		authUser = str(selectedUser["name"])
+	} else {
+		return nil, errors.New("multiple users found; --auth-user is required")
+	}
+	entry := findPublicEntryForAgent(agent, "reality", "")
+	host := str(entry["host"])
+	port := int64Value(entry["public_port"])
+	if host == "" || port <= 0 {
+		if host = str(asObj(agent["network"])["public_ip"]); host == "" {
+			host = str(asObj(agent["network"])["observed_ip"])
+		}
+		port = int64Value(inbound["listen_port"])
+	}
+	if host == "" || port <= 0 {
+		return nil, errors.New("transit public host/port is unavailable; set a reality public entry or public IP")
+	}
+	flow := firstNonEmpty(str(selectedUser["flow"]), "xtls-rprx-vision")
+	name := firstNonEmpty(str(selectedUser["name"]), authUser)
+	exported := obj{
+		"kind":        "relaypilot/client-export",
+		"version":     version,
+		"format":      "remnawave",
+		"agent_id":    agent["id"],
+		"agent_name":  agent["name"],
+		"auth_user":   name,
+		"server":      host,
+		"server_port": port,
+		"uuid":        selectedUser["uuid"],
+		"flow":        flow,
+		"transport":   "tcp",
+		"security":    "reality",
+		"server_name": reality["server_name"],
+		"public_key":  reality["public_key"],
+		"short_id":    reality["short_id"],
+		"fingerprint": "chrome",
+		"profile": obj{
+			"type":         "vless",
+			"tag":          name,
+			"server":       host,
+			"server_port":  port,
+			"uuid":         selectedUser["uuid"],
+			"network":      "tcp",
+			"tls":          true,
+			"flow":         flow,
+			"security":     "reality",
+			"server_name":  reality["server_name"],
+			"public_key":   reality["public_key"],
+			"short_id":     reality["short_id"],
+			"fingerprint":  "chrome",
+			"inbound_tag":  reality["inbound_tag"],
+			"transit_name": agent["name"],
+		},
+	}
+	return exported, nil
+}
+
+func hubExportTransitClient(stateDir, transitID, authUser string) (obj, error) {
+	if _, err := ensureSafeName(transitID, "transit.id"); err != nil {
+		return nil, err
+	}
+	if authUser != "" {
+		if _, err := ensureSafeName(authUser, "auth_user"); err != nil {
+			return nil, err
+		}
+	}
+	agents, err := listHubAgents(stateDir)
+	if err != nil {
+		return nil, err
+	}
+	transit, err := findHubAgentByID(agents, transitID)
+	if err != nil {
+		return nil, err
+	}
+	if str(transit["role"]) != "transit" {
+		return nil, fmt.Errorf("%s is not a transit agent", transitID)
+	}
+	exported, err := transitRealityClientMaterial(transit, authUser)
+	if err != nil {
+		return nil, err
+	}
+	syncAt := int64Value(transit["sync_at"])
+	exported["cache"] = obj{
+		"source":    "hub-registry",
+		"synced_at": syncAt,
+		"stale":     syncAt <= 0 || now()-syncAt > defaultSyncStaleSeconds,
+	}
+	return exported, nil
+}
+
+func hubExportLandingCachePath(stateDir, landingID, endpointName string) (string, error) {
+	if _, err := ensureSafeName(landingID, "landing.id"); err != nil {
+		return "", err
+	}
+	if _, err := ensureSafeName(endpointName, "endpoint.name"); err != nil {
+		return "", err
+	}
+	return filepath.Join(hubExportsDir(stateDir), "landing-"+landingID+"-"+endpointName+".json"), nil
+}
+
+func storeHubLandingExport(stateDir, landingID string, endpoint obj, publicEntries obj) error {
+	endpointName := str(endpoint["name"])
+	path, err := hubExportLandingCachePath(stateDir, landingID, endpointName)
+	if err != nil {
+		return err
+	}
+	record := obj{
+		"kind":          "relaypilot/hub-landing-export",
+		"version":       version,
+		"landing_id":    landingID,
+		"endpoint_name": endpointName,
+		"stored_at":     now(),
+		"endpoint":      endpoint,
+	}
+	if len(publicEntries) > 0 {
+		record["public_entries"] = publicEntries
+	}
+	return writeJSON(path, record, 0o600)
+}
+
+func loadHubLandingExport(stateDir, landingID, endpointName string) (obj, error) {
+	path, err := hubExportLandingCachePath(stateDir, landingID, endpointName)
+	if err != nil {
+		return nil, err
+	}
+	return loadJSON(path)
+}
+
+func hubExportLandingConfig(stateDir, landingID, endpointName string) (obj, error) {
+	if _, err := ensureSafeName(landingID, "landing.id"); err != nil {
+		return nil, err
+	}
+	if endpointName == "" {
+		return nil, errors.New("--endpoint-name is required")
+	}
+	if _, err := ensureSafeName(endpointName, "endpoint.name"); err != nil {
+		return nil, err
+	}
+	record, err := loadHubLandingExport(stateDir, landingID, endpointName)
+	if err != nil {
+		return nil, err
+	}
+	endpoint, err := validateEndpoint(asObj(record["endpoint"]), true)
+	if err != nil {
+		return nil, err
+	}
+	exported := obj{
+		"kind":          "relaypilot/landing-client-export",
+		"version":       version,
+		"landing_id":    landingID,
+		"endpoint_name": endpointName,
+		"protocol":      endpoint["protocol"],
+		"server":        endpoint["server"],
+		"server_port":   endpoint["server_port"],
+		"stored_at":     record["stored_at"],
+	}
+	switch str(endpoint["protocol"]) {
+	case "socks":
+		exported["config"] = obj{
+			"type":        "socks",
+			"server":      endpoint["server"],
+			"server_port": endpoint["server_port"],
+			"version":     firstNonNil(endpoint["socks_version"], endpoint["version_field"], "5"),
+			"username":    endpoint["username"],
+			"password":    endpoint["password"],
+		}
+	case "shadowsocks":
+		exported["config"] = obj{
+			"type":        "shadowsocks",
+			"server":      endpoint["server"],
+			"server_port": endpoint["server_port"],
+			"method":      endpoint["method"],
+			"password":    endpoint["password"],
+			"network":     endpoint["network"],
+		}
+	default:
+		return nil, fmt.Errorf("unsupported landing export protocol: %s", endpoint["protocol"])
+	}
+	storedAt := int64Value(record["stored_at"])
+	exported["cache"] = obj{
+		"source":    "hub-export-file",
+		"synced_at": storedAt,
+		"stale":     storedAt <= 0 || now()-storedAt > defaultSyncStaleSeconds,
+	}
+	return exported, nil
+}
+
+func storeHubSyncSnapshot(stateDir, agentID string, result obj) error {
+	reg, err := loadHubRegistry(stateDir)
+	if err != nil {
+		return err
+	}
+	agents := asObj(reg["agents"])
+	current := asObj(agents[agentID])
+	if len(current) == 0 {
+		return fmt.Errorf("agent not found: %s", agentID)
+	}
+	if topology := asObj(result["topology"]); len(topology) > 0 {
+		current["topology"] = topology
+	}
+	if network := asObj(result["network"]); len(network) > 0 {
+		current["network"] = network
+	}
+	current["sync_at"] = now()
+	agents[agentID] = current
+	reg["agents"] = agents
+	return saveHubRegistry(stateDir, reg)
+}
+
+func hubSyncAgent(stateDir, agentID string) (obj, error) {
+	if _, err := ensureSafeName(agentID, "agent.id"); err != nil {
+		return nil, err
+	}
+	agents, err := listHubAgents(stateDir)
+	if err != nil {
+		return nil, err
+	}
+	agent, err := findHubAgentByID(agents, agentID)
+	if err != nil {
+		return nil, err
+	}
+	task, err := createHubTask(stateDir, agent, "sync_agent", nil, fmt.Sprintf("%d-%s", now(), mustRandomHex(4)), "hub-sync-agent")
+	if err != nil {
+		return nil, err
+	}
+	return obj{"queued": task["id"], "agent_id": agentID, "command": "sync_agent"}, nil
+}
+
+func hubSyncAll(stateDir string) (obj, error) {
+	agents, err := listHubAgents(stateDir)
+	if err != nil {
+		return nil, err
+	}
+	batchID := fmt.Sprintf("%d-%s", now(), mustRandomHex(4))
+	queued := []any{}
+	for _, agent := range agents {
+		task, err := createHubTask(stateDir, agent, "sync_agent", nil, batchID, "hub-sync-all")
+		if err != nil {
+			return nil, err
+		}
+		queued = append(queued, obj{"task_id": task["id"], "agent_id": agent["id"]})
+	}
+	return obj{"batch_id": batchID, "queued": queued}, nil
+}
+
+func queueHubDetailRefreshForAgents(stateDir string, agents []obj, originText, reason string) (obj, error) {
+	batchID := fmt.Sprintf("%d-%s", now(), mustRandomHex(4))
+	queued := []any{}
+	seen := map[string]bool{}
+	for _, agent := range agents {
+		agentID := str(agent["id"])
+		if agentID == "" || seen[agentID] || isPendingAgent(agent) {
+			continue
+		}
+		seen[agentID] = true
+		task, err := createHubTask(stateDir, agent, "sync_agent", nil, batchID, originText)
+		if err != nil {
+			return nil, err
+		}
+		queued = append(queued, obj{"task_id": task["id"], "agent_id": agentID})
+	}
+	if len(queued) == 0 {
+		return nil, errors.New("no active agents available for detail refresh")
+	}
+	return obj{"batch_id": batchID, "queued": queued, "reason": reason}, nil
+}
+
 func hashToken(token string) (string, error) {
 	if token == "" {
 		return "", errors.New("agent token is required")
@@ -3441,6 +3865,19 @@ func collectTopology(role, stateDir, conf string) obj {
 			}
 			topo["inbounds"] = inbounds
 			if role == "transit" {
+				for _, raw := range inbounds {
+					inbound := asObj(raw)
+					if str(inbound["type"]) == "vless" {
+						if clientInfo, err := vlessInboundClientInfo(conf, str(inbound["tag"])); err == nil {
+							topo["reality_client"] = clientInfo
+						} else {
+							errs = append(errs, "reality_client: "+err.Error())
+						}
+						break
+					}
+				}
+			}
+			if role == "transit" {
 				var links []any
 				for _, raw := range asList(asObj(summary["route"])["auth_routes"]) {
 					r := asObj(raw)
@@ -3514,7 +3951,14 @@ func updateHeartbeat(stateDir, agentID string, topology, health, network obj) (o
 		agent["health"] = health
 	}
 	if network != nil {
-		agent["network"] = network
+		current := asObj(agent["network"])
+		if len(current) == 0 {
+			current = obj{}
+		}
+		for k, v := range network {
+			current[k] = v
+		}
+		agent["network"] = current
 	}
 	agents[agentID] = agent
 	reg["agents"] = agents
@@ -3711,11 +4155,21 @@ func completeHubTask(stateDir, taskID, agentID string, result obj) (obj, error) 
 		task["status"] = "failed"
 	}
 	task["completed_at"] = now()
+	if str(task["command"]) == "export_endpoint" && task["status"] == "done" {
+		if err := storeHubLandingExport(stateDir, str(task["agent_id"]), asObj(result["endpoint"]), asObj(result["public_entries"])); err != nil {
+			task["export_cache_error"] = err.Error()
+		}
+	}
 	storedResult := result
 	if str(task["command"]) == "export_endpoint" {
 		storedResult = sanitizeTaskResult(result)
 	}
 	task["result"] = storedResult
+	if str(task["command"]) == "sync_agent" && task["status"] == "done" {
+		if err := storeHubSyncSnapshot(stateDir, agentID, result); err != nil {
+			task["sync_store_error"] = err.Error()
+		}
+	}
 	if str(task["command"]) == "bind_endpoint" {
 		task["payload"] = sanitizeTaskPayload(asObj(task["payload"]))
 	}
@@ -4101,10 +4555,30 @@ func hubDispatchCommand(stateDir, text string) (string, error) {
 		return formatAgentsText(agents), nil
 	case "topology", "tree":
 		return formatHubTopologyText(agents), nil
+	case "sync":
+		if len(args) == 0 {
+			return "", errors.New("usage: /sync <agent_id|all>")
+		}
+		if args[0] == "all" {
+			res, err := hubSyncAll(stateDir)
+			if err != nil {
+				return "", err
+			}
+			return fmt.Sprintf("已下发节点详情刷新：批次 %s，任务 %d 个", str(res["batch_id"]), len(asList(res["queued"]))), nil
+		}
+		res, err := hubSyncAgent(stateDir, args[0])
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("已下发节点详情刷新：%s -> %s", str(res["agent_id"]), str(res["queued"])), nil
 	case "link", "connect":
 		return hubLinkTransitLanding(stateDir, agents, args, text)
+	case "probe", "probe_link", "check_link", "link_probe", "link_check":
+		return hubProbeLink(stateDir, agents, args, text)
 	case "update", "upgrade":
 		return hubUpdateCommand(stateDir, agents, args, text)
+	case "decommission", "retire":
+		return hubDecommissionCommand(stateDir, agents, args, text)
 	case "alerts":
 		alerts, err := listHubAlerts(stateDir)
 		if err != nil {
@@ -4173,6 +4647,129 @@ func hubDispatchCommand(stateDir, text string) (string, error) {
 		fmt.Fprintf(&b, "%s %s · %s\n", roleIcon(str(agent["role"])), str(agent["id"]), str(agent["name"]))
 	}
 	return strings.TrimRight(b.String(), "\n"), nil
+}
+
+func normalizeDecommissionMode(mode string) (string, error) {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	switch mode {
+	case "", "detach", "leave", "leave-hub":
+		return "detach", nil
+	case "purge", "purge-managed-proxy", "reset-agent", "reset-proxy":
+		return "purge-managed-proxy", nil
+	case "uninstall", "full":
+		return "uninstall", nil
+	default:
+		return "", fmt.Errorf("unsupported decommission mode: %s", mode)
+	}
+}
+
+func parseDecommissionArgs(args []string) (agentID, mode, confirm string, dryRun bool, err error) {
+	mode = "uninstall"
+	dryRun = true
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--mode":
+			if i+1 >= len(args) {
+				return "", "", "", true, errors.New("--mode requires a value")
+			}
+			mode = args[i+1]
+			i++
+		case "--dry-run", "--preview":
+			dryRun = true
+		case "--confirm":
+			if i+1 >= len(args) {
+				return "", "", "", true, errors.New("--confirm requires the exact agent id")
+			}
+			confirm = args[i+1]
+			dryRun = false
+			i++
+		default:
+			if strings.HasPrefix(args[i], "--mode=") {
+				mode = strings.TrimPrefix(args[i], "--mode=")
+				continue
+			}
+			if strings.HasPrefix(args[i], "--confirm=") {
+				confirm = strings.TrimPrefix(args[i], "--confirm=")
+				dryRun = false
+				continue
+			}
+			if strings.HasPrefix(args[i], "--") {
+				return "", "", "", true, fmt.Errorf("unexpected decommission argument: %s", args[i])
+			}
+			if agentID == "" {
+				agentID = args[i]
+			} else {
+				return "", "", "", true, fmt.Errorf("unexpected decommission argument: %s", args[i])
+			}
+		}
+	}
+	if agentID == "" {
+		return "", "", "", true, errors.New("usage: /decommission <agent_id> [--mode detach|purge-managed-proxy|uninstall] [--confirm agent_id]")
+	}
+	mode, err = normalizeDecommissionMode(mode)
+	if err != nil {
+		return "", "", "", true, err
+	}
+	if !dryRun && confirm != agentID {
+		return "", "", "", true, fmt.Errorf("--confirm must exactly match agent id: %s", agentID)
+	}
+	return agentID, mode, confirm, dryRun, nil
+}
+
+func decommissionModeLabel(mode string) string {
+	switch mode {
+	case "detach":
+		return "退出 Hub 托管"
+	case "purge-managed-proxy":
+		return "清理 RelayPilot 托管代理配置"
+	case "uninstall":
+		return "彻底卸载 RelayPilot 与托管代理配置"
+	default:
+		return mode
+	}
+}
+
+func hubDecommissionCommand(stateDir string, agents []obj, args []string, originText string) (string, error) {
+	agentID, mode, _, dryRun, err := parseDecommissionArgs(args)
+	if err != nil {
+		return "", err
+	}
+	agent, err := findHubAgentByID(agents, agentID)
+	if err != nil {
+		return "", err
+	}
+	if str(agent["status"]) == "pending" {
+		return "", fmt.Errorf("agent is still pending enrollment: %s", agentID)
+	}
+	batchID := fmt.Sprintf("%d-%s", now(), mustRandomHex(4))
+	payload := obj{
+		"mode":          mode,
+		"dry_run":       dryRun,
+		"delay_seconds": 12,
+	}
+	if _, err := createHubTaskWithPayload(stateDir, agent, "decommission_agent", []string{mode}, payload, batchID, originText); err != nil {
+		return "", err
+	}
+	lines := []string{}
+	if dryRun {
+		lines = append(lines,
+			"🧯 已下发远程退役预览",
+			"目标："+agentID,
+			"模式："+decommissionModeLabel(mode),
+			"批次："+batchID,
+			"节点本机授权：必须已开启 allow_remote_decommission=true，否则 Agent 会拒绝。",
+			"预览不删除文件；确认执行需追加："+"/decommission "+agentID+" --mode "+mode+" --confirm "+agentID,
+		)
+	} else {
+		lines = append(lines,
+			"🧯 已下发远程退役",
+			"目标："+agentID,
+			"模式："+decommissionModeLabel(mode),
+			"批次："+batchID,
+			"Agent 会先回报结果，再延迟执行本机清理；清理后该节点将停止回连。",
+		)
+	}
+	return strings.Join(lines, "\n"), nil
 }
 
 func parseUpdateArgs(args []string) (selector, updateVersion string, restart bool, err error) {
@@ -4378,6 +4975,178 @@ func scheduleServiceRestart(services []string, delaySeconds int) error {
 	return nil
 }
 
+func linkProbeTimeoutSeconds(v int64) int {
+	if v <= 0 {
+		return defaultLinkProbeTimeoutSeconds
+	}
+	if v < 1 {
+		return 1
+	}
+	if v > maxLinkProbeTimeoutSeconds {
+		return maxLinkProbeTimeoutSeconds
+	}
+	return int(v)
+}
+
+func parseLinkProbeArgs(args []string) (transitID, landingID, endpointName string, timeoutSeconds int, err error) {
+	timeoutSeconds = defaultLinkProbeTimeoutSeconds
+	var positional []string
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--timeout" || arg == "--timeout-seconds":
+			if i+1 >= len(args) {
+				return "", "", "", 0, errors.New("--timeout requires seconds")
+			}
+			n, parseErr := strconv.ParseInt(args[i+1], 10, 64)
+			if parseErr != nil {
+				return "", "", "", 0, fmt.Errorf("--timeout must be an integer: %w", parseErr)
+			}
+			timeoutSeconds = linkProbeTimeoutSeconds(n)
+			i++
+		case strings.HasPrefix(arg, "--timeout="):
+			n, parseErr := strconv.ParseInt(strings.TrimPrefix(arg, "--timeout="), 10, 64)
+			if parseErr != nil {
+				return "", "", "", 0, fmt.Errorf("--timeout must be an integer: %w", parseErr)
+			}
+			timeoutSeconds = linkProbeTimeoutSeconds(n)
+		case strings.HasPrefix(arg, "--timeout-seconds="):
+			n, parseErr := strconv.ParseInt(strings.TrimPrefix(arg, "--timeout-seconds="), 10, 64)
+			if parseErr != nil {
+				return "", "", "", 0, fmt.Errorf("--timeout-seconds must be an integer: %w", parseErr)
+			}
+			timeoutSeconds = linkProbeTimeoutSeconds(n)
+		default:
+			positional = append(positional, arg)
+		}
+	}
+	if len(positional) < 2 {
+		return "", "", "", 0, errors.New("usage: /probe <transit_id> <landing_id> [endpoint_name] [--timeout seconds]")
+	}
+	transitID, landingID = positional[0], positional[1]
+	if len(positional) >= 3 {
+		endpointName = positional[2]
+	}
+	if len(positional) > 3 {
+		return "", "", "", 0, fmt.Errorf("unexpected probe argument: %s", positional[3])
+	}
+	return transitID, landingID, endpointName, timeoutSeconds, nil
+}
+
+func landingEndpointSnapshot(landing obj, endpointName string) obj {
+	for _, raw := range asList(asObj(landing["topology"])["endpoints"]) {
+		endpoint := asObj(raw)
+		if endpointName == "" || str(endpoint["name"]) == endpointName {
+			return endpoint
+		}
+	}
+	return nil
+}
+
+func probeTargetFromHubSnapshots(transit, landing obj, endpointName string) (obj, error) {
+	var selectedLink obj
+	for _, link := range matchingTransitLinksForLanding(transit, landing) {
+		if endpointName != "" && str(link["endpoint_name"]) != "" && str(link["endpoint_name"]) != endpointName {
+			continue
+		}
+		host := str(link["server"])
+		port := int64Value(link["server_port"])
+		if host == "" || port <= 0 {
+			selectedLink = link
+			continue
+		}
+		target := obj{
+			"host":          host,
+			"port":          port,
+			"endpoint_name": firstNonEmpty(endpointName, str(link["endpoint_name"])),
+			"outbound_tag":  link["outbound_tag"],
+			"auth_user":     link["auth_user"],
+			"source":        "transit_link",
+		}
+		if mode := str(link["link_mode"]); mode != "" {
+			target["link_mode"] = mode
+		}
+		return target, nil
+	}
+	endpoint := landingEndpointSnapshot(landing, endpointName)
+	if len(endpoint) == 0 {
+		if selectedLink != nil {
+			return nil, errors.New("matched transit link is missing probe host/port and landing endpoint snapshot is unavailable")
+		}
+		return nil, fmt.Errorf("landing endpoint snapshot not found: %s", firstNonEmpty(endpointName, "(first endpoint)"))
+	}
+	host := str(endpoint["server"])
+	port := int64Value(endpoint["server_port"])
+	if host == "" || port <= 0 {
+		return nil, fmt.Errorf("landing endpoint %s is missing server/server_port", str(endpoint["name"]))
+	}
+	return obj{
+		"host":          host,
+		"port":          port,
+		"endpoint_name": str(endpoint["name"]),
+		"outbound_tag":  endpoint["tag"],
+		"source":        "landing_endpoint",
+	}, nil
+}
+
+func hubProbeLink(stateDir string, agents []obj, args []string, originText string) (string, error) {
+	transitID, landingID, endpointName, timeoutSeconds, err := parseLinkProbeArgs(args)
+	if err != nil {
+		return "", err
+	}
+	transit, err := findHubAgentByID(agents, transitID)
+	if err != nil {
+		return "", err
+	}
+	landing, err := findHubAgentByID(agents, landingID)
+	if err != nil {
+		return "", err
+	}
+	if str(transit["role"]) != "transit" {
+		return "", fmt.Errorf("%s is not a transit agent", transitID)
+	}
+	if str(landing["role"]) != "landing" {
+		return "", fmt.Errorf("%s is not a landing agent", landingID)
+	}
+	target, err := probeTargetFromHubSnapshots(transit, landing, endpointName)
+	if err != nil {
+		return "", err
+	}
+	port := int64Value(target["port"])
+	if port <= 0 || port > 65535 {
+		return "", fmt.Errorf("invalid probe port: %v", target["port"])
+	}
+	selectedEndpoint := firstNonEmpty(str(target["endpoint_name"]), endpointName)
+	batchID := fmt.Sprintf("%d-%s", now(), mustRandomHex(4))
+	payload := obj{
+		"transit_id":      transitID,
+		"landing_id":      landingID,
+		"endpoint_name":   selectedEndpoint,
+		"host":            str(target["host"]),
+		"port":            port,
+		"timeout_seconds": timeoutSeconds,
+		"target_source":   target["source"],
+	}
+	for _, key := range []string{"outbound_tag", "auth_user", "link_mode"} {
+		if str(target[key]) != "" {
+			payload[key] = target[key]
+		}
+	}
+	if _, err := createHubTaskWithPayload(stateDir, transit, "probe_link", []string{landingID, selectedEndpoint}, payload, batchID, originText); err != nil {
+		return "", err
+	}
+	lines := []string{
+		"🧪 已下发链路检测",
+		fmt.Sprintf("链路：%s → %s", transitID, landingID),
+		fmt.Sprintf("目标：%s", net.JoinHostPort(str(target["host"]), strconv.Itoa(int(port)))),
+		fmt.Sprintf("超时：%ds", timeoutSeconds),
+		fmt.Sprintf("批次：%s", batchID),
+		"资源：单次 TCP 探测，不会启动后台监控或持续轮询。",
+		"结果稍后在“最近操作”查看。",
+	}
+	return strings.Join(lines, "\n"), nil
+}
+
 func hubLinkTransitLanding(stateDir string, agents []obj, args []string, originText string) (string, error) {
 	if len(args) < 2 {
 		return "", errors.New("usage: /link <transit_id> <landing_id> [auth_user] [endpoint_name] [--mode direct|mesh] [--inbound-tag tag] [--flow flow]")
@@ -4395,6 +5164,8 @@ func hubLinkTransitLanding(stateDir string, agents []obj, args []string, originT
 	meshKeepalive := defaultMeshKeepaliveSeconds
 	meshConfigDir := defaultMeshConfigDir
 	meshAutoUp := true
+	applyDataPlane := true
+	restartService := true
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--auth-user":
@@ -4469,6 +5240,14 @@ func hubLinkTransitLanding(stateDir string, agents []obj, args []string, originT
 			i++
 		case "--mesh-no-up":
 			meshAutoUp = false
+		case "--no-apply", "--no-dataplane-apply":
+			applyDataPlane = false
+		case "--apply", "--apply-dataplane":
+			applyDataPlane = true
+		case "--no-restart", "--no-restart-service", "--no-restart-services":
+			restartService = false
+		case "--restart", "--restart-service", "--restart-services":
+			restartService = true
 		case "--inbound-tag":
 			if i+1 >= len(args) {
 				return "", errors.New("--inbound-tag requires a value")
@@ -4531,18 +5310,29 @@ func hubLinkTransitLanding(stateDir string, agents []obj, args []string, originT
 		endpointName = firstLandingEndpointName(landing)
 	}
 	if endpointName == "" {
-		return "", fmt.Errorf("landing %s has no endpoint snapshot yet; wait for agent heartbeat or configure landing first", landingID)
+		refresh, refreshErr := queueHubDetailRefreshForAgents(stateDir, []obj{transit, landing}, originText, "missing landing endpoint snapshot")
+		if refreshErr != nil {
+			return "", fmt.Errorf("landing %s has no endpoint snapshot and detail refresh could not be queued: %w", landingID, refreshErr)
+		}
+		return strings.Join([]string{
+			"需要刷新节点详情",
+			fmt.Sprintf("链路：%s → %s", transitID, landingID),
+			fmt.Sprintf("已下发节点详情刷新：批次 %s，任务 %d 个", str(refresh["batch_id"]), len(asList(refresh["queued"]))),
+			"刷新完成后再次串联。",
+		}, "\n"), nil
 	}
 	if _, err := normalizeLinkMode(linkMode); err != nil {
 		return "", err
 	}
 	batchID := fmt.Sprintf("%d-%s", now(), mustRandomHex(4))
 	payload := obj{
-		"transit_id":    transitID,
-		"landing_id":    landingID,
-		"endpoint_name": endpointName,
-		"auth_user":     firstNonEmpty(authUser, endpointName),
-		"link_mode":     linkMode,
+		"transit_id":      transitID,
+		"landing_id":      landingID,
+		"endpoint_name":   endpointName,
+		"auth_user":       firstNonEmpty(authUser, endpointName),
+		"link_mode":       linkMode,
+		"apply_dataplane": applyDataPlane,
+		"restart_service": restartService,
 	}
 	if inboundTag != "" {
 		payload["inbound_tag"] = inboundTag
@@ -4578,6 +5368,13 @@ func hubLinkTransitLanding(stateDir string, agents []obj, args []string, originT
 		)
 	} else {
 		lines = append(lines, "流程：落地先回传 endpoint，Hub 再自动下发给中转绑定。")
+	}
+	if applyDataPlane && restartService {
+		lines = append(lines, "生效：中转绑定后会自动 sing-box check、热重载，失败再重启。")
+	} else if applyDataPlane {
+		lines = append(lines, "生效：中转绑定后会自动 sing-box check，但不重启服务。")
+	} else {
+		lines = append(lines, "生效：仅写入配置，不自动 check/应用。")
 	}
 	return strings.Join(lines, "\n"), nil
 }
@@ -4933,26 +5730,308 @@ func truthy(v any) bool {
 }
 
 func runCommand(timeout time.Duration, name string, args ...string) error {
+	_, err := runCommandOutput(timeout, name, args...)
+	return err
+}
+
+func runCommandOutput(timeout time.Duration, name string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, name, args...)
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
-		return fmt.Errorf("%s timed out", name)
+		return string(out), fmt.Errorf("%s timed out", name)
 	}
 	if err != nil {
-		return fmt.Errorf("%s %s: %s", name, strings.Join(args, " "), strings.TrimSpace(string(out)))
+		return string(out), fmt.Errorf("%s %s: %s", name, strings.Join(args, " "), strings.TrimSpace(string(out)))
 	}
-	return nil
+	return string(out), nil
 }
 
-func findHubAgentByID(agents []obj, agentID string) (obj, error) {
-	for _, agent := range agents {
-		if str(agent["id"]) == agentID {
-			return agent, nil
-		}
+func envBoolDefault(key string, fallback bool) bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	switch value {
+	case "":
+		return fallback
+	case "1", "true", "yes", "y", "on":
+		return true
+	case "0", "false", "no", "n", "off":
+		return false
+	default:
+		return fallback
 	}
-	return nil, fmt.Errorf("agent not found: %s", agentID)
+}
+
+func boolDefault(v any, fallback bool) bool {
+	if v == nil {
+		return fallback
+	}
+	switch x := v.(type) {
+	case bool:
+		return x
+	case string:
+		switch strings.ToLower(strings.TrimSpace(x)) {
+		case "1", "true", "yes", "y", "on":
+			return true
+		case "0", "false", "no", "n", "off":
+			return false
+		}
+	case int:
+		return x != 0
+	case int64:
+		return x != 0
+	case float64:
+		return x != 0
+	}
+	return fallback
+}
+
+func findSingBoxBinary() string {
+	if path := strings.TrimSpace(os.Getenv("RELAYPILOT_SINGBOX_BIN")); path != "" {
+		return path
+	}
+	if info, err := os.Stat("/etc/sing-box/sing-box"); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+		return "/etc/sing-box/sing-box"
+	}
+	if path, err := exec.LookPath("sing-box"); err == nil {
+		return path
+	}
+	return ""
+}
+
+func singBoxCheckConfig(conf string) (obj, error) {
+	bin := findSingBoxBinary()
+	if bin == "" {
+		return obj{"status": "skipped", "reason": "sing-box-missing"}, nil
+	}
+	args := []string{"check", "-c", conf}
+	if info, err := os.Stat(conf); err == nil && info.IsDir() {
+		args = []string{"check", "-C", conf}
+	}
+	out, err := runCommandOutput(30*time.Second, bin, args...)
+	if err != nil {
+		return obj{"status": "failed", "binary": bin, "error": err.Error(), "output": lastNonEmptyLines(out, 6)}, fmt.Errorf("sing-box check failed: %w", err)
+	}
+	res := obj{"status": "ok", "binary": bin}
+	if trimmed := lastNonEmptyLines(out, 4); trimmed != "" {
+		res["output"] = trimmed
+	}
+	return res, nil
+}
+
+func serviceManagerCommand() (string, string) {
+	if preferred := strings.TrimSpace(os.Getenv("RELAYPILOT_SERVICE_MANAGER")); preferred != "" {
+		if path, err := exec.LookPath(preferred); err == nil {
+			return preferred, path
+		}
+		return preferred, preferred
+	}
+	if path, err := exec.LookPath("rc-service"); err == nil {
+		return "rc-service", path
+	}
+	if path, err := exec.LookPath("systemctl"); err == nil {
+		return "systemctl", path
+	}
+	return "", ""
+}
+
+func serviceManagerRun(manager, path, service, action string) (obj, error) {
+	var args []string
+	switch manager {
+	case "rc-service":
+		args = []string{service, action}
+	case "systemctl":
+		if action == "status" {
+			args = []string{"is-active", service}
+		} else {
+			args = []string{action, service}
+		}
+	default:
+		return obj{"status": "skipped", "reason": "service-manager-missing"}, nil
+	}
+	out, err := runCommandOutput(30*time.Second, path, args...)
+	if err != nil {
+		return obj{"status": "failed", "manager": manager, "error": err.Error(), "output": lastNonEmptyLines(out, 6)}, err
+	}
+	res := obj{"status": "ok", "manager": manager}
+	if trimmed := lastNonEmptyLines(out, 4); trimmed != "" {
+		res["output"] = trimmed
+	}
+	return res, nil
+}
+
+func dataPlaneApplyMode(payload obj) string {
+	mode := strings.ToLower(strings.TrimSpace(firstNonEmpty(
+		str(payload["apply_mode"]),
+		os.Getenv("RELAYPILOT_SINGBOX_APPLY_MODE"),
+		"reload-first",
+	)))
+	mode = strings.ReplaceAll(mode, "_", "-")
+	switch mode {
+	case "manual", "check", "check-only":
+		return "manual"
+	case "restart", "restart-only":
+		return "restart"
+	case "reload", "reload-only":
+		return "reload"
+	case "", "auto", "reload-first":
+		return "reload-first"
+	default:
+		return "reload-first"
+	}
+}
+
+func applyDataPlaneChange(conf string, payload obj) (obj, error) {
+	mode := dataPlaneApplyMode(payload)
+	apply := obj{"conf": conf, "mode": mode}
+	if strings.TrimSpace(os.Getenv("RELAYPILOT_DISABLE_DATAPLANE_APPLY")) != "" {
+		apply["applied"] = false
+		apply["check"] = obj{"status": "skipped", "reason": "disabled"}
+		apply["reload"] = obj{"status": "skipped", "reason": "disabled"}
+		apply["restart"] = obj{"status": "skipped", "reason": "disabled"}
+		apply["status"] = obj{"status": "skipped", "reason": "disabled"}
+		return apply, nil
+	}
+	if !boolDefault(payload["apply_dataplane"], true) {
+		apply["applied"] = false
+		apply["check"] = obj{"status": "skipped", "reason": "apply-disabled"}
+		apply["reload"] = obj{"status": "skipped", "reason": "apply-disabled"}
+		apply["restart"] = obj{"status": "skipped", "reason": "apply-disabled"}
+		apply["status"] = obj{"status": "skipped", "reason": "apply-disabled"}
+		return apply, nil
+	}
+	check, err := singBoxCheckConfig(conf)
+	apply["check"] = check
+	if err != nil {
+		apply["applied"] = false
+		apply["reload"] = obj{"status": "skipped", "reason": "check-failed"}
+		apply["restart"] = obj{"status": "skipped", "reason": "check-failed"}
+		apply["status"] = obj{"status": "skipped", "reason": "check-failed"}
+		return apply, err
+	}
+	if str(check["status"]) != "ok" {
+		apply["applied"] = false
+		apply["reload"] = obj{"status": "skipped", "reason": str(check["reason"])}
+		apply["restart"] = obj{"status": "skipped", "reason": str(check["reason"])}
+		apply["status"] = obj{"status": "skipped", "reason": str(check["reason"])}
+		return apply, nil
+	}
+	restartEnabled := envBoolDefault("RELAYPILOT_AUTO_RESTART_SINGBOX", true)
+	restartEnabled = boolDefault(payload["restart_service"], restartEnabled)
+	service := firstNonEmpty(str(payload["service_name"]), envOrDefault("RELAYPILOT_SINGBOX_SERVICE_NAME", "sing-box"))
+	apply["service"] = service
+	if !restartEnabled {
+		apply["applied"] = false
+		apply["reload"] = obj{"status": "skipped", "reason": "restart-disabled"}
+		apply["restart"] = obj{"status": "skipped", "reason": "restart-disabled"}
+		apply["status"] = obj{"status": "skipped", "reason": "restart-disabled"}
+		return apply, nil
+	}
+	if mode == "manual" {
+		apply["applied"] = false
+		apply["reload"] = obj{"status": "skipped", "reason": "manual"}
+		apply["restart"] = obj{"status": "skipped", "reason": "manual"}
+		apply["status"] = obj{"status": "skipped", "reason": "manual"}
+		return apply, nil
+	}
+	manager, managerPath := serviceManagerCommand()
+	if manager == "" {
+		apply["applied"] = false
+		apply["reload"] = obj{"status": "skipped", "reason": "service-manager-missing"}
+		apply["restart"] = obj{"status": "skipped", "reason": "service-manager-missing"}
+		apply["status"] = obj{"status": "skipped", "reason": "service-manager-missing"}
+		return apply, nil
+	}
+	if mode == "reload" || mode == "reload-first" {
+		reload, err := serviceManagerRun(manager, managerPath, service, "reload")
+		apply["reload"] = reload
+		if err == nil {
+			apply["restart"] = obj{"status": "skipped", "reason": "reload-ok"}
+			status, err := serviceManagerRun(manager, managerPath, service, "status")
+			apply["status"] = status
+			if err != nil {
+				apply["applied"] = false
+				return apply, fmt.Errorf("sing-box status check failed: %w", err)
+			}
+			apply["applied"] = true
+			return apply, nil
+		}
+		if mode == "reload" {
+			apply["applied"] = false
+			apply["restart"] = obj{"status": "skipped", "reason": "reload-failed"}
+			apply["status"] = obj{"status": "skipped", "reason": "reload-failed"}
+			return apply, fmt.Errorf("sing-box reload failed: %w", err)
+		}
+	} else {
+		apply["reload"] = obj{"status": "skipped", "reason": "restart-mode"}
+	}
+	restart, err := serviceManagerRun(manager, managerPath, service, "restart")
+	apply["restart"] = restart
+	if err != nil {
+		apply["applied"] = false
+		apply["status"] = obj{"status": "skipped", "reason": "restart-failed"}
+		return apply, fmt.Errorf("sing-box restart failed: %w", err)
+	}
+	status, err := serviceManagerRun(manager, managerPath, service, "status")
+	apply["status"] = status
+	if err != nil {
+		apply["applied"] = false
+		return apply, fmt.Errorf("sing-box status check failed: %w", err)
+	}
+	apply["applied"] = true
+	return apply, nil
+}
+
+func formatDataPlaneApplyText(apply obj) string {
+	if len(apply) == 0 {
+		return ""
+	}
+	if truthy(apply["applied"]) {
+		reload := asObj(apply["reload"])
+		restart := asObj(apply["restart"])
+		if str(reload["status"]) == "ok" {
+			return "sing-box 已热重载并确认运行"
+		}
+		if str(reload["status"]) == "failed" && str(restart["status"]) == "ok" {
+			return "sing-box 热重载失败后已重启并确认运行"
+		}
+		return "sing-box 已重启并确认运行"
+	}
+	check := asObj(apply["check"])
+	switch str(check["status"]) {
+	case "failed":
+		return "sing-box check 失败，配置未确认生效"
+	case "skipped":
+		reason := firstNonEmpty(str(check["reason"]), "skipped")
+		return "配置已写入，但未自动校验/应用（" + reason + "）"
+	}
+	reload := asObj(apply["reload"])
+	restart := asObj(apply["restart"])
+	if str(reload["status"]) == "skipped" && str(restart["status"]) == "skipped" {
+		reason := firstNonEmpty(str(reload["reason"]), str(restart["reason"]), "skipped")
+		return "配置已写入并通过 check，但未自动应用（" + reason + "）"
+	}
+	if str(reload["status"]) == "failed" && str(restart["status"]) == "skipped" {
+		return "配置已写入并通过 check，但 sing-box 热重载失败"
+	}
+	if str(reload["status"]) == "failed" && str(restart["status"]) == "failed" {
+		return "配置已写入并通过 check，但 sing-box 热重载和重启均失败"
+	}
+	if str(restart["status"]) == "skipped" {
+		reason := firstNonEmpty(str(restart["reason"]), "skipped")
+		return "配置已写入并通过 check，但未自动重启（" + reason + "）"
+	}
+	if str(restart["status"]) == "failed" {
+		return "配置已写入并通过 check，但 sing-box 重启失败"
+	}
+	status := asObj(apply["status"])
+	if str(status["status"]) == "failed" {
+		if str(reload["status"]) == "ok" {
+			return "配置已写入并已请求热重载，但运行状态确认失败"
+		}
+		return "配置已写入并已请求重启，但运行状态确认失败"
+	}
+	return "配置已写入，数据面状态需人工确认"
 }
 
 func firstLandingEndpointName(landing obj) string {
@@ -5087,9 +6166,33 @@ func formatAgentsText(agents []obj) string {
 		if networkLabel := agentNetworkLabel(agent); networkLabel != "" {
 			suffix += " · " + networkLabel
 		}
+		if syncLabel := agentSyncLabel(agent); syncLabel != "" {
+			suffix += " · " + syncLabel
+		}
 		fmt.Fprintf(&b, "%s %s %s · %s · %s%s\n", livenessIcon(agent), roleIcon(str(agent["role"])), str(agent["id"]), str(agent["name"]), livenessLabel(agent), suffix)
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+func agentSyncLabel(agent obj) string {
+	syncAt := int64Value(agent["sync_at"])
+	if syncAt <= 0 {
+		return "未刷新详情"
+	}
+	age := now() - syncAt
+	if age < 0 {
+		age = 0
+	}
+	if age < 60 {
+		return "上次刷新 刚刚"
+	}
+	if age < 3600 {
+		return fmt.Sprintf("上次刷新 %d 分钟前", age/60)
+	}
+	if age < 86400 {
+		return fmt.Sprintf("上次刷新 %d 小时前", age/3600)
+	}
+	return fmt.Sprintf("上次刷新 %d 天前", age/86400)
 }
 
 func isPendingAgent(agent obj) bool {
@@ -5537,10 +6640,10 @@ func filterDoneTasks(tasks []obj, batchID string) []obj {
 func formatHubTaskResultsText(tasks []obj, batchID string) string {
 	selected := filterDoneTasks(tasks, batchID)
 	if len(selected) == 0 {
-		return "暂无已完成任务结果。"
+		return "暂无最近操作。"
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "📬 任务结果：%d\n", len(selected))
+	fmt.Fprintf(&b, "📬 最近操作：%d\n", len(selected))
 	for _, task := range selected {
 		fmt.Fprintf(&b, "\n%s %s %s /%s\n", statusIcon(str(task["status"])), roleIcon(str(task["agent_role"])), str(task["agent_id"]), str(task["command"]))
 		res := asObj(task["result"])
@@ -5554,11 +6657,77 @@ func formatHubTaskResultsText(tasks []obj, batchID string) string {
 					b.WriteString(line + "\n")
 				}
 			}
-		} else if str(res["error"]) != "" {
-			fmt.Fprintf(&b, "error: %s\n", str(res["error"]))
+		}
+		errText := str(res["error"])
+		if errText != "" {
+			fmt.Fprintf(&b, "错误：%s\n", errText)
+		}
+		if hint := taskFailureHint(task, res); hint != "" {
+			fmt.Fprintf(&b, "建议：%s\n", hint)
 		}
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+func taskFailureHint(task, res obj) string {
+	status := str(task["status"])
+	success, hasSuccess := res["success"].(bool)
+	if status != "failed" && (!hasSuccess || success) {
+		return ""
+	}
+	command := str(task["command"])
+	msg := strings.ToLower(str(res["error"]) + "\n" + str(res["text"]))
+	switch {
+	case strings.Contains(msg, "address already in use") || strings.Contains(msg, "bind:"):
+		return "检查端口占用，或调整对应监听端口。"
+	case strings.Contains(msg, "sing-box check failed"):
+		return "检查 sing-box 配置片段后重试。"
+	case strings.Contains(msg, "remote decommission is disabled") || strings.Contains(msg, "allow_remote_decommission"):
+		return "在节点本机开启远程退役授权后重试。"
+	case strings.Contains(msg, "connection refused") || strings.Contains(msg, "i/o timeout") || strings.Contains(msg, "no route to host"):
+		return "检查目标地址、端口、防火墙和公网入口。"
+	case strings.Contains(msg, "task lease expired"):
+		return "检查 Agent 服务是否运行，再恢复超时任务。"
+	case command == "self_update":
+		return "检查版本号、网络访问和节点磁盘空间。"
+	case strings.Contains(msg, "unsupported agent task command"):
+		return "升级节点 RelayPilot 后重试。"
+	default:
+		return ""
+	}
+}
+
+func recentOperationLine(tasks []obj) string {
+	if len(tasks) == 0 {
+		return "最近操作：暂无"
+	}
+	for _, task := range tasks {
+		status := str(task["status"])
+		if status == "" {
+			continue
+		}
+		agentID := str(task["agent_id"])
+		command := str(task["command"])
+		if agentID == "" && command == "" {
+			continue
+		}
+		label := status
+		switch status {
+		case "queued":
+			label = "等待执行"
+		case "running":
+			label = "执行中"
+		case "done":
+			label = "成功"
+		case "failed":
+			label = "失败"
+		case "cancelled":
+			label = "已取消"
+		}
+		target := strings.TrimSpace(agentID + " /" + command)
+		return "最近操作：" + target + " · " + label
+	}
+	return "最近操作：暂无"
 }
 
 func batchTasks(tasks []obj, batchID string) []obj {
@@ -5684,7 +6853,7 @@ func collectReadyPendingTGBatches(stateDir string) ([]obj, error) {
 					"batch_id":    batchID,
 					"chat_id":     batch["chat_id"],
 					"origin_text": batch["origin_text"],
-					"text":        fmt.Sprintf("⏱️ 任务结果超时：%s\n没有找到该批次任务。", batchID),
+					"text":        fmt.Sprintf("⏱️ 最近操作超时：%s\n没有找到该批次任务。", batchID),
 				})
 				delete(batches, batchID)
 				changed = true
@@ -5707,7 +6876,7 @@ func collectReadyPendingTGBatches(stateDir string) ([]obj, error) {
 				"batch_id":    batchID,
 				"chat_id":     batch["chat_id"],
 				"origin_text": batch["origin_text"],
-				"text":        "⏱️ 部分任务仍未完成，当前结果：\n" + formatHubTaskResultsText(tasks, batchID),
+				"text":        "⏱️ 部分任务仍未完成，当前最近操作：\n" + formatHubTaskResultsText(tasks, batchID),
 			})
 			delete(batches, batchID)
 			changed = true
@@ -6401,7 +7570,9 @@ func hubPanelReply(stateDir string) telegramReply {
 		fmt.Sprintf("节点：%d 在线 / %d 待接入 / %d 可能掉线 / %d 离线", online, pending, stale, offline),
 		fmt.Sprintf("Transit：%d · Landing：%d", transits, landings),
 		fmt.Sprintf("待处理任务：%d", queued),
+		recentOperationLine(tasks),
 		"",
+		"常用操作：刷新详情、拓扑、节点、最近操作、链路检测。",
 		"更新中心只给出可复制命令，不会误触执行。",
 	}
 	return telegramReply{
@@ -6409,8 +7580,10 @@ func hubPanelReply(stateDir string) telegramReply {
 		ParseMode: "HTML",
 		ReplyMarkup: tgKeyboard(
 			[]any{tgButton("🔄 刷新状态", "rp:panel")},
+			[]any{tgButton("🔁 刷新详情", "rp:sync_all")},
 			[]any{tgButton("🌐 拓扑", "rp:topology"), tgButton("📊 节点", "rp:agents")},
-			[]any{tgButton("📬 任务结果", "rp:results"), tgButton("⬆️ 更新中心", "rp:update")},
+			[]any{tgButton("🧪 链路检测", "rp:probe_help"), tgButton("📬 最近操作", "rp:results")},
+			[]any{tgButton("⬆️ 更新中心", "rp:update")},
 			[]any{tgURLButton("⭐ GitHub", "https://github.com/jiwen77/relaypilot")},
 		),
 		CallbackText: "已刷新",
@@ -6421,7 +7594,7 @@ func defaultUpdateExampleVersion() string {
 	if strings.HasPrefix(buildVersion, "v") {
 		return buildVersion
 	}
-	return "v0.1.5"
+	return "v0.1.6"
 }
 
 func updateCenterReply() telegramReply {
@@ -6537,6 +7710,113 @@ func runTelegramHubDaemon(stateDir string, interval, timeout, limit int, quiet b
 	}
 }
 
+func operationGuideReply() telegramReply {
+	lines := []string{
+		"🧭 <b>RelayPilot 操作向导</b>",
+		"",
+		"1. <b>Hub</b>：生成邀请码，分别接入中转和落地。",
+		"2. <b>Agent</b>：按角色完成本机 Reality / Shadowsocks / SOCKS5 配置。",
+		"3. <b>Hub</b>：点“刷新详情”，更新节点拓扑和公网入口。",
+		"4. <b>Hub</b>：串联节点，系统会让落地回传 endpoint，再让中转绑定。",
+		"5. <b>检测</b>：按需做一次链路检测；默认 3s 超时，不开后台监控。",
+		"6. <b>结果</b>：最近操作里应看到 sing-box check、热重载、运行状态确认。",
+		"7. <b>客户端</b>：链路确认后再导出 RemnaWave / 客户端配置。",
+		"",
+		"提示：公网 IP 模式只做可见性；真正对外服务地址用“公网入口”。",
+	}
+	return telegramReply{
+		Text:         strings.Join(lines, "\n"),
+		ParseMode:    "HTML",
+		ReplyMarkup:  tgBackKeyboard(),
+		CallbackText: "操作向导",
+	}
+}
+
+func endpointNameForProbeExample(landing, link obj) string {
+	if name := str(link["endpoint_name"]); name != "" {
+		return name
+	}
+	outboundTag := str(link["outbound_tag"])
+	if outboundTag != "" {
+		for _, raw := range asList(asObj(landing["topology"])["endpoints"]) {
+			endpoint := asObj(raw)
+			if str(endpoint["tag"]) == outboundTag && str(endpoint["name"]) != "" {
+				return str(endpoint["name"])
+			}
+		}
+	}
+	return firstLandingEndpointName(landing)
+}
+
+func probeHelpCommandExamples(stateDir string, limit int) []string {
+	if limit <= 0 {
+		limit = 5
+	}
+	agents, err := listHubAgents(stateDir)
+	if err != nil {
+		return nil
+	}
+	var transits, landings []obj
+	for _, agent := range agents {
+		switch str(agent["role"]) {
+		case "transit":
+			transits = append(transits, agent)
+		case "landing":
+			landings = append(landings, agent)
+		}
+	}
+	var examples []string
+	for _, transit := range transits {
+		for _, landing := range landings {
+			for _, link := range matchingTransitLinksForLanding(transit, landing) {
+				endpointName := endpointNameForProbeExample(landing, link)
+				if endpointName == "" {
+					continue
+				}
+				examples = append(examples, fmt.Sprintf("/relaypilot_probe %s %s %s", str(transit["id"]), str(landing["id"]), endpointName))
+				if len(examples) >= limit {
+					return examples
+				}
+			}
+		}
+	}
+	return examples
+}
+
+func probeHelpReply(stateDir string) telegramReply {
+	lines := []string{
+		"🧪 <b>链路检测</b>",
+		"",
+		"只对一条 Transit → Landing 做一次 TCP 连通性探测。",
+		"不会启动后台监控，也不会对所有节点并发扫描。",
+		"",
+		"<b>建议流程：</b>",
+		"1. 先点“刷新详情”，确保 Hub 有最新 endpoint/链路快照。",
+		"2. 从“拓扑”复制 transit_id 和 landing_id。",
+		"3. 发送一条检测命令：",
+		htmlCode("/relaypilot_probe transit-la landing-jp jp"),
+		"",
+		"默认超时 3s，最大 5s；如需指定：",
+		htmlCode("/relaypilot_check_link transit-la landing-jp jp --timeout 3"),
+	}
+	if examples := probeHelpCommandExamples(stateDir, 5); len(examples) > 0 {
+		lines = append(lines,
+			"",
+			"<b>可检测链路：</b>",
+			"仅生成命令，不会立即探测；复制其中一条发送即可。",
+		)
+		for _, example := range examples {
+			lines = append(lines, htmlCode(example))
+		}
+	}
+	return telegramReply{
+		Text:         strings.Join(lines, "\n"),
+		ParseMode:    "HTML",
+		ReplyMarkup:  tgBackKeyboard(),
+		CallbackText: "链路检测",
+	}
+}
+
 func handleTelegramHubUpdate(stateDir string, update obj) string {
 	return handleTelegramHubReply(stateDir, update).Text
 }
@@ -6550,6 +7830,16 @@ func handleTelegramHubReply(stateDir string, update obj) telegramReply {
 		switch data {
 		case "rp:panel":
 			return hubPanelReply(stateDir)
+		case "rp:guide":
+			return operationGuideReply()
+		case "rp:probe_help":
+			return probeHelpReply(stateDir)
+		case "rp:sync_all":
+			out, err := hubDispatchCommand(stateDir, "/sync all")
+			if err != nil {
+				return textPanelReply("❌ " + err.Error())
+			}
+			return textPanelReply(out)
 		case "rp:update":
 			return updateCenterReply()
 		case "rp:topology":
@@ -6681,8 +7971,14 @@ func executeTask(task obj, stateDir, conf string) obj {
 	switch command {
 	case "export_endpoint":
 		return executeExportEndpointTask(task, stateDir)
+	case "sync_agent":
+		return executeSyncAgentTask(task, stateDir, conf)
 	case "bind_endpoint":
 		return executeBindEndpointTask(task, stateDir, conf)
+	case "probe_link":
+		return executeProbeLinkTask(task)
+	case "decommission_agent":
+		return executeDecommissionAgentTask(task, stateDir, conf)
 	case "unbind_endpoint":
 		return executeUnbindEndpointTask(task, stateDir, conf)
 	case "teardown_mesh":
@@ -6702,6 +7998,23 @@ func executeTask(task obj, stateDir, conf string) obj {
 		return obj{"success": false, "command": command, "error": err.Error()}
 	}
 	return obj{"success": true, "command": command, "text": out}
+}
+
+func executeSyncAgentTask(task obj, stateDir, conf string) obj {
+	role := str(task["agent_role"])
+	topology := collectTopology(role, stateDir, conf)
+	network := obj{}
+	if entries, err := listPublicEntries(stateDir); err == nil && len(entries) > 0 {
+		network["public_entries"] = entries
+	}
+	return obj{
+		"success":  true,
+		"command":  "sync_agent",
+		"agent_id": task["agent_id"],
+		"topology": topology,
+		"network":  network,
+		"text":     "agent details synced",
+	}
 }
 
 func executeExportEndpointTask(task obj, stateDir string) obj {
@@ -6749,6 +8062,272 @@ func executeExportEndpointTask(task obj, stateDir string) obj {
 	return result
 }
 
+func compactProbeError(err error) string {
+	msg := strings.TrimSpace(err.Error())
+	if msg == "" {
+		return "unknown probe error"
+	}
+	if len(msg) > 240 {
+		msg = msg[:240] + "..."
+	}
+	return msg
+}
+
+func executeProbeLinkTask(task obj) obj {
+	payload := asObj(task["payload"])
+	host := strings.TrimSpace(str(payload["host"]))
+	port := int(int64Value(payload["port"]))
+	timeoutSeconds := linkProbeTimeoutSeconds(int64Value(payload["timeout_seconds"]))
+	result := obj{
+		"command":         "probe_link",
+		"host":            host,
+		"port":            port,
+		"timeout_seconds": timeoutSeconds,
+		"landing_id":      payload["landing_id"],
+		"endpoint_name":   payload["endpoint_name"],
+		"target_source":   payload["target_source"],
+	}
+	if host == "" {
+		result["success"] = false
+		result["reachable"] = false
+		result["error"] = "probe host is required"
+		result["text"] = "链路检测不可达：缺少目标 host"
+		return result
+	}
+	if port <= 0 || port > 65535 {
+		result["success"] = false
+		result["reachable"] = false
+		result["error"] = fmt.Sprintf("invalid probe port: %d", port)
+		result["text"] = "链路检测不可达：目标端口无效"
+		return result
+	}
+	target := net.JoinHostPort(host, strconv.Itoa(port))
+	result["target"] = target
+	start := time.Now()
+	dialer := net.Dialer{Timeout: time.Duration(timeoutSeconds) * time.Second}
+	conn, err := dialer.Dial("tcp", target)
+	duration := time.Since(start)
+	result["duration_ms"] = duration.Milliseconds()
+	if err != nil {
+		msg := compactProbeError(err)
+		result["success"] = false
+		result["reachable"] = false
+		result["error"] = msg
+		result["text"] = fmt.Sprintf("链路检测不可达：%s（%dms，超时 %ds）\n错误：%s", target, duration.Milliseconds(), timeoutSeconds, msg)
+		return result
+	}
+	_ = conn.Close()
+	result["success"] = true
+	result["reachable"] = true
+	result["text"] = fmt.Sprintf("链路检测连通：%s（%dms，超时 %ds）", target, duration.Milliseconds(), timeoutSeconds)
+	return result
+}
+
+func remoteDecommissionAllowed(stateDir string) bool {
+	if truthy(os.Getenv("RELAYPILOT_ALLOW_REMOTE_DECOMMISSION")) {
+		return true
+	}
+	policy, err := loadJSON(agentPolicyPath(stateDir))
+	if err != nil {
+		return false
+	}
+	return truthy(policy["allow_remote_decommission"])
+}
+
+func decommissionDelaySeconds(v int64) int {
+	if v <= 0 {
+		return 12
+	}
+	if v < 5 {
+		return 5
+	}
+	if v > 300 {
+		return 300
+	}
+	return int(v)
+}
+
+func relayPilotCLIArgsForDecommission(mode string) ([]string, error) {
+	switch mode {
+	case "detach":
+		return []string{"leave-hub"}, nil
+	case "purge-managed-proxy":
+		return []string{"reset-agent"}, nil
+	case "uninstall":
+		return []string{"uninstall", "--full", "--purge-proxy-config", "--yes"}, nil
+	default:
+		return nil, fmt.Errorf("unsupported decommission mode: %s", mode)
+	}
+}
+
+func managedProxyFragmentPaths(conf string) []string {
+	var paths []string
+	if conf != "" {
+		if matches, err := filepath.Glob(filepath.Join(conf, "*relaypilot*.json")); err == nil {
+			paths = append(paths, matches...)
+		}
+	}
+	wgDir := firstNonEmpty(strings.TrimSpace(os.Getenv("MESH_CONFIG_DIR")), defaultMeshConfigDir)
+	if entries, err := os.ReadDir(wgDir); err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".conf") {
+				continue
+			}
+			path := filepath.Join(wgDir, entry.Name())
+			data, err := os.ReadFile(path)
+			if err == nil && bytes.Contains(data, []byte(wireGuardConfigMarker)) {
+				paths = append(paths, path)
+			}
+		}
+	}
+	sort.Strings(paths)
+	return paths
+}
+
+func decommissionPlanLines(mode, stateDir, conf string, cliArgs []string) []string {
+	lines := []string{
+		"模式：" + decommissionModeLabel(mode),
+		"将执行：" + "relaypilot " + strings.Join(cliArgs, " "),
+	}
+	switch mode {
+	case "detach":
+		lines = append(lines,
+			"将停止并移除 Agent 轮询服务。",
+			"将删除 Hub 接入凭证。",
+			"保留 RelayPilot 程序与代理配置。",
+		)
+	case "purge-managed-proxy":
+		lines = append(lines,
+			"将删除 Hub 接入凭证、endpoint 缓存与公网入口记录。",
+			"将删除 RelayPilot 托管的 sing-box 片段和 WireGuard mesh。",
+			"保留 RelayPilot 程序。",
+		)
+	case "uninstall":
+		lines = append(lines,
+			"将卸载 RelayPilot 程序、服务和状态目录。",
+			"将删除 RelayPilot 托管的 sing-box 片段和 WireGuard mesh。",
+		)
+	}
+	lines = append(lines,
+		"状态目录："+stateDir,
+		"代理配置目录："+conf,
+	)
+	fragments := managedProxyFragmentPaths(conf)
+	if len(fragments) == 0 {
+		lines = append(lines, "当前未发现 RelayPilot 托管代理片段。")
+	} else {
+		lines = append(lines, "将清理托管代理片段：")
+		for _, path := range fragments {
+			lines = append(lines, "- "+path)
+		}
+	}
+	lines = append(lines, "不会执行任意 shell；不会删除未带 RelayPilot 标记的用户配置。")
+	return lines
+}
+
+func decommissionCommandEnv(stateDir, conf string) []string {
+	env := os.Environ()
+	env = append(env,
+		"STATE_DIR="+stateDir,
+		"CONF_DIR="+conf,
+		"RELAYPILOT_NONINTERACTIVE=1",
+		"RELAYPILOT_REMOTE_DECOMMISSION=1",
+	)
+	if meshDir := strings.TrimSpace(os.Getenv("MESH_CONFIG_DIR")); meshDir != "" {
+		env = append(env, "MESH_CONFIG_DIR="+meshDir)
+	}
+	return env
+}
+
+func scheduleDecommissionCleanup(mode, stateDir, conf string, delaySeconds int) (obj, error) {
+	cli, err := relayPilotCLIPath()
+	if err != nil {
+		return nil, err
+	}
+	args, err := relayPilotCLIArgsForDecommission(mode)
+	if err != nil {
+		return nil, err
+	}
+	env := decommissionCommandEnv(stateDir, conf)
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("RELAYPILOT_DECOMMISSION_EXEC_MODE")), "foreground") {
+		cmd := exec.Command(cli, args...)
+		cmd.Env = env
+		out, err := cmd.CombinedOutput()
+		summary := obj{"scheduler": "foreground", "cli": cli, "args": stringsToAny(args), "output": lastNonEmptyLines(string(out), 8)}
+		if err != nil {
+			return summary, fmt.Errorf("decommission cleanup failed: %w: %s", err, lastNonEmptyLines(string(out), 8))
+		}
+		return summary, nil
+	}
+	if systemdRun, err := exec.LookPath("systemd-run"); err == nil && os.Geteuid() == 0 && strings.TrimSpace(os.Getenv("RELAYPILOT_DECOMMISSION_SCHEDULER")) != "sh" {
+		unit := "relaypilot-decommission-" + mustRandomHex(4)
+		runArgs := []string{
+			"--unit", unit,
+			"--collect",
+			"--property=Type=oneshot",
+			"--setenv=STATE_DIR=" + stateDir,
+			"--setenv=CONF_DIR=" + conf,
+			"--setenv=RELAYPILOT_NONINTERACTIVE=1",
+			"--setenv=RELAYPILOT_REMOTE_DECOMMISSION=1",
+			"sh", "-c", `sleep "$1"; shift; exec "$@"`,
+			"relaypilot-decommission", strconv.Itoa(delaySeconds), cli,
+		}
+		runArgs = append(runArgs, args...)
+		out, err := exec.Command(systemdRun, runArgs...).CombinedOutput()
+		summary := obj{"scheduler": "systemd-run", "unit": unit, "cli": cli, "args": stringsToAny(args), "output": lastNonEmptyLines(string(out), 8)}
+		if err != nil {
+			return summary, fmt.Errorf("systemd-run decommission schedule failed: %w: %s", err, lastNonEmptyLines(string(out), 8))
+		}
+		return summary, nil
+	}
+	shellArgs := []string{"-c", `sleep "$1"; shift; exec "$@"`, "relaypilot-decommission", strconv.Itoa(delaySeconds), cli}
+	shellArgs = append(shellArgs, args...)
+	cmd := exec.Command("sh", shellArgs...)
+	cmd.Env = env
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	return obj{"scheduler": "sh", "pid": cmd.Process.Pid, "cli": cli, "args": stringsToAny(args)}, nil
+}
+
+func executeDecommissionAgentTask(task obj, stateDir, conf string) obj {
+	stateDir = firstNonEmpty(strings.TrimSpace(stateDir), defaultStateDir)
+	conf = firstNonEmpty(strings.TrimSpace(conf), defaultConfDir)
+	payload := asObj(task["payload"])
+	mode, err := normalizeDecommissionMode(firstNonEmpty(str(payload["mode"]), joinAny(asList(task["args"])), "uninstall"))
+	if err != nil {
+		return obj{"success": false, "command": "decommission_agent", "error": err.Error()}
+	}
+	if !remoteDecommissionAllowed(stateDir) {
+		return obj{"success": false, "command": "decommission_agent", "mode": mode, "error": "remote decommission is disabled on this agent; set allow_remote_decommission=true locally"}
+	}
+	cliArgs, err := relayPilotCLIArgsForDecommission(mode)
+	if err != nil {
+		return obj{"success": false, "command": "decommission_agent", "mode": mode, "error": err.Error()}
+	}
+	dryRun := truthy(payload["dry_run"])
+	delaySeconds := decommissionDelaySeconds(int64Value(payload["delay_seconds"]))
+	lines := append([]string{"远程退役预览"}, decommissionPlanLines(mode, stateDir, conf, cliArgs)...)
+	result := obj{
+		"success":       true,
+		"command":       "decommission_agent",
+		"mode":          mode,
+		"dry_run":       dryRun,
+		"delay_seconds": delaySeconds,
+	}
+	if dryRun {
+		result["text"] = strings.Join(lines, "\n")
+		return result
+	}
+	schedule, err := scheduleDecommissionCleanup(mode, stateDir, conf, delaySeconds)
+	if err != nil {
+		return obj{"success": false, "command": "decommission_agent", "mode": mode, "dry_run": false, "error": err.Error(), "schedule": schedule}
+	}
+	result["schedule"] = schedule
+	result["text"] = fmt.Sprintf("远程退役已确认：%s；已安排约 %d 秒后执行本机清理。", decommissionModeLabel(mode), delaySeconds)
+	return result
+}
+
 func executeBindEndpointTask(task obj, stateDir, conf string) obj {
 	payload := asObj(task["payload"])
 	endpoint := asObj(payload["endpoint"])
@@ -6782,6 +8361,25 @@ func executeBindEndpointTask(task obj, stateDir, conf string) obj {
 	if err != nil {
 		return obj{"success": false, "command": "bind_endpoint", "error": err.Error()}
 	}
+	apply, applyErr := applyDataPlaneChange(conf, payload)
+	if applyErr != nil {
+		return obj{
+			"success":       false,
+			"command":       "bind_endpoint",
+			"endpoint_name": endpoint["name"],
+			"endpoint_tag":  endpoint["tag"],
+			"auth_user":     authUser,
+			"summary":       summary,
+			"apply":         apply,
+			"error":         applyErr.Error(),
+			"text":          fmt.Sprintf("linked auth_user %s to endpoint %s, but data-plane apply failed: %s", authUser, endpoint["name"], applyErr.Error()),
+		}
+	}
+	applyText := formatDataPlaneApplyText(apply)
+	text := fmt.Sprintf("linked auth_user %s to endpoint %s", authUser, endpoint["name"])
+	if applyText != "" {
+		text += "；" + applyText
+	}
 	result := obj{
 		"success":       true,
 		"command":       "bind_endpoint",
@@ -6790,11 +8388,15 @@ func executeBindEndpointTask(task obj, stateDir, conf string) obj {
 		"link_mode":     firstNonEmpty(str(payload["link_mode"]), str(endpoint["link_mode"]), "direct"),
 		"auth_user":     authUser,
 		"summary":       summary,
-		"text":          fmt.Sprintf("linked auth_user %s to endpoint %s", authUser, endpoint["name"]),
+		"apply":         apply,
+		"text":          text,
 	}
 	if len(meshSummary) > 0 {
 		result["mesh"] = meshSummary
 		result["text"] = fmt.Sprintf("mesh ready and linked auth_user %s to endpoint %s", authUser, endpoint["name"])
+		if applyText != "" {
+			result["text"] = str(result["text"]) + "；" + applyText
+		}
 	}
 	return result
 }
@@ -7016,6 +8618,62 @@ func configurePollerNetwork(p *agentPoller, ipMode string, publicIPIntervalSecon
 	return nil
 }
 
+type fileStamp struct {
+	ModUnixNano int64
+	Size        int64
+}
+
+func statFileStamp(path string) (fileStamp, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return fileStamp{}, err
+	}
+	return fileStamp{ModUnixNano: info.ModTime().UnixNano(), Size: info.Size()}, nil
+}
+
+func newAgentPollerFromEnrollmentFile(path, stateDir, conf string, maxTasks int, timeout time.Duration, topologyIntervalSeconds int) (*agentPoller, fileStamp, error) {
+	cfg, err := loadAgentEnrollmentFile(path)
+	if err != nil {
+		return nil, fileStamp{}, err
+	}
+	if cfg.Role == "" {
+		cfg.Role = "transit"
+	}
+	secret, err := readAgentToken("", cfg.TokenFile)
+	if err != nil {
+		return nil, fileStamp{}, err
+	}
+	tlsConfig, err := loadAgentTLSConfig(cfg.CACertPath, cfg.ClientCertPath, cfg.ClientKeyPath, "")
+	if err != nil {
+		return nil, fileStamp{}, err
+	}
+	poller := newAgentPoller(cfg.HubURL, cfg.AgentID, secret, cfg.Role, stateDir, conf, maxTasks, timeout, topologyIntervalSeconds)
+	poller.tlsConfig = tlsConfig
+	if err := configurePollerNetwork(poller, cfg.IPMode, cfg.PublicIPIntervalSeconds); err != nil {
+		return nil, fileStamp{}, err
+	}
+	stamp, err := statFileStamp(path)
+	if err != nil {
+		return nil, fileStamp{}, err
+	}
+	return poller, stamp, nil
+}
+
+func reloadAgentPollerFromEnrollmentFileIfChanged(path string, previous fileStamp, current *agentPoller, stateDir, conf string, maxTasks int, timeout time.Duration, topologyIntervalSeconds int) (*agentPoller, fileStamp, bool, error) {
+	next, err := statFileStamp(path)
+	if err != nil {
+		return current, previous, false, err
+	}
+	if next == previous {
+		return current, previous, false, nil
+	}
+	poller, stamp, err := newAgentPollerFromEnrollmentFile(path, stateDir, conf, maxTasks, timeout, topologyIntervalSeconds)
+	if err != nil {
+		return current, previous, false, err
+	}
+	return poller, stamp, true, nil
+}
+
 func (p *agentPoller) topology() (obj, obj) {
 	if p.topologyInterval > 0 && p.cachedTopology != nil && time.Now().Before(p.topologyExpires) {
 		return p.cachedTopology, p.cachedHealth
@@ -7062,34 +8720,16 @@ func (p *agentPoller) publicIP() (string, int64, string) {
 }
 
 func (p *agentPoller) network() obj {
-	mode, err := normalizeIPMode(p.ipMode)
-	if err != nil {
-		mode = "static"
-	}
-	network := obj{"ip_mode": mode, "reported_at": now()}
-	if mode != "dynamic" {
-		return network
-	}
-	publicIP, checkedAt, probeErr := p.publicIP()
-	if publicIP != "" {
-		network["public_ip"] = publicIP
-	}
-	if checkedAt > 0 {
-		network["public_ip_checked_at"] = checkedAt
-	}
-	if probeErr != "" {
-		network["public_ip_error"] = probeErr
-	}
-	return network
+	return obj{"reported_at": now()}
 }
 
 func (p *agentPoller) pollOnce() (obj, error) {
 	if p.hubURL == "" || p.agentID == "" {
 		return nil, errors.New("hub-url and agent-id are required")
 	}
-	topo, health := p.topology()
+	_, health := p.topology()
 	base := strings.TrimRight(p.hubURL, "/")
-	heartbeat, err := httpJSONRequestWithTLS("POST", base+"/api/agents/"+url.PathEscape(p.agentID)+"/heartbeat", obj{"topology": topo, "health": health, "network": p.network()}, p.token, p.agentID, p.timeout, p.tlsConfig)
+	heartbeat, err := httpJSONRequestWithTLS("POST", base+"/api/agents/"+url.PathEscape(p.agentID)+"/heartbeat", obj{"health": health, "network": p.network()}, p.token, p.agentID, p.timeout, p.tlsConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -7143,6 +8783,47 @@ func agentPollLoopWithTLSAndNetwork(hubURL, agentID, token, role, stateDir, conf
 		result, err := poller.pollOnce()
 		if err != nil {
 			wire, _ := json.Marshal(obj{"ok": false, "agent_id": agentID, "error": err.Error(), "retry_in_seconds": int(backoff.Seconds())})
+			fmt.Fprintln(os.Stderr, string(wire))
+			time.Sleep(backoff)
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+			continue
+		}
+		backoff = time.Duration(interval) * time.Second
+		wire, err := json.Marshal(result)
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(wire))
+		time.Sleep(time.Duration(interval) * time.Second)
+	}
+}
+
+func agentPollLoopWithEnrollmentFile(enrollmentFile, stateDir, conf string, interval, maxTasks int, timeout time.Duration, topologyIntervalSeconds int) error {
+	if interval < 1 {
+		interval = 1
+	}
+	poller, stamp, err := newAgentPollerFromEnrollmentFile(enrollmentFile, stateDir, conf, maxTasks, timeout, topologyIntervalSeconds)
+	if err != nil {
+		return err
+	}
+	backoff := time.Duration(interval) * time.Second
+	maxBackoff := 5 * time.Minute
+	for {
+		nextPoller, nextStamp, changed, err := reloadAgentPollerFromEnrollmentFileIfChanged(enrollmentFile, stamp, poller, stateDir, conf, maxTasks, timeout, topologyIntervalSeconds)
+		if err != nil {
+			wire, _ := json.Marshal(obj{"ok": false, "agent_id": poller.agentID, "error": "enrollment reload failed: " + err.Error()})
+			fmt.Fprintln(os.Stderr, string(wire))
+		} else if changed {
+			poller, stamp = nextPoller, nextStamp
+			backoff = time.Duration(interval) * time.Second
+		}
+
+		result, err := poller.pollOnce()
+		if err != nil {
+			wire, _ := json.Marshal(obj{"ok": false, "agent_id": poller.agentID, "error": err.Error(), "retry_in_seconds": int(backoff.Seconds())})
 			fmt.Fprintln(os.Stderr, string(wire))
 			time.Sleep(backoff)
 			backoff *= 2
@@ -7379,6 +9060,13 @@ func validateSSPassword(method, password string, strict bool) error {
 	return nil
 }
 
+func validateSOCKSCredentials(username, password string) error {
+	if (username == "") != (password == "") {
+		return errors.New("socks username and password must both be set or both be empty")
+	}
+	return nil
+}
+
 func validateEndpoint(endpoint obj, strictPassword bool) (obj, error) {
 	if str(endpoint["kind"]) != endpointKind {
 		return nil, fmt.Errorf("unsupported endpoint kind: %q", endpoint["kind"])
@@ -7437,6 +9125,16 @@ func validateEndpoint(endpoint obj, strictPassword bool) (obj, error) {
 			return nil, err
 		}
 		out["server_port"] = port
+		if versionField := firstNonNil(out["version_field"], out["socks_version"]); versionField != nil {
+			version := str(versionField)
+			if version != "4" && version != "4a" && version != "5" {
+				return nil, fmt.Errorf("unsupported socks version: %s", version)
+			}
+			out["socks_version"] = version
+		}
+		if err := validateSOCKSCredentials(str(out["username"]), str(out["password"])); err != nil {
+			return nil, err
+		}
 		return out, nil
 	default:
 		return nil, fmt.Errorf("unsupported endpoint protocol: %q", protocol)
@@ -7450,6 +9148,24 @@ func makeSSEndpoint(name, server string, serverPort int, method, password, tag, 
 	endpoint := obj{"kind": endpointKind, "version": version, "name": name, "protocol": "shadowsocks", "server": server, "server_port": serverPort, "method": method, "password": password, "tag": tag}
 	if network != "" {
 		endpoint["network"] = network
+	}
+	if description != "" {
+		endpoint["description"] = description
+	}
+	return validateEndpoint(endpoint, true)
+}
+
+func makeSOCKSEndpoint(name, server string, serverPort int, username, password, tag, description string) (obj, error) {
+	if err := validateSOCKSCredentials(username, password); err != nil {
+		return nil, err
+	}
+	if tag == "" {
+		tag = "landing-" + name + "-socks"
+	}
+	endpoint := obj{"kind": endpointKind, "version": version, "name": name, "protocol": "socks", "server": server, "server_port": serverPort, "socks_version": "5", "tag": tag}
+	if username != "" {
+		endpoint["username"] = username
+		endpoint["password"] = password
 	}
 	if description != "" {
 		endpoint["description"] = description
@@ -7471,12 +9187,42 @@ func makeLandingSSConfig(listen string, listenPort int, method, password, tag st
 	return obj{"log": obj{"level": "info", "timestamp": true}, "inbounds": []any{obj{"type": "shadowsocks", "tag": tag, "listen": listen, "listen_port": port, "method": method, "password": password}}, "outbounds": []any{obj{"type": "direct", "tag": "direct"}}, "route": obj{"final": "direct"}}, nil
 }
 
+func makeLandingSOCKSConfig(listen string, listenPort int, username, password, tag string) (obj, error) {
+	if err := validateSOCKSCredentials(username, password); err != nil {
+		return nil, err
+	}
+	if _, err := ensureSafeTag(tag, "inbound.tag"); err != nil {
+		return nil, err
+	}
+	port, err := ensurePort(listenPort, "listen_port")
+	if err != nil {
+		return nil, err
+	}
+	inbound := obj{"type": "socks", "tag": tag, "listen": listen, "listen_port": port}
+	if username != "" {
+		inbound["users"] = []any{obj{"username": username, "password": password}}
+	}
+	return obj{"log": obj{"level": "info", "timestamp": true}, "inbounds": []any{inbound}, "outbounds": []any{obj{"type": "direct", "tag": "direct"}}, "route": obj{"final": "direct"}}, nil
+}
+
 func renderLandingSS(name, server, listen string, listenPort, serverPort int, method, password, network, inboundTag, endpointTag string) (obj, obj, error) {
 	endpoint, err := makeSSEndpoint(name, server, serverPort, method, password, endpointTag, network, name+" landing via sing-box Shadowsocks")
 	if err != nil {
 		return nil, nil, err
 	}
 	config, err := makeLandingSSConfig(listen, listenPort, method, password, inboundTag)
+	if err != nil {
+		return nil, nil, err
+	}
+	return endpoint, config, nil
+}
+
+func renderLandingSOCKS(name, server, listen string, listenPort, serverPort int, username, password, inboundTag, endpointTag string) (obj, obj, error) {
+	endpoint, err := makeSOCKSEndpoint(name, server, serverPort, username, password, endpointTag, name+" landing via sing-box SOCKS5")
+	if err != nil {
+		return nil, nil, err
+	}
+	config, err := makeLandingSOCKSConfig(listen, listenPort, username, password, inboundTag)
 	if err != nil {
 		return nil, nil, err
 	}

@@ -90,7 +90,21 @@ if [[ $# -gt 0 ]]; then
     --enroll|--invite)
       if [[ $# -lt 2 ]]; then echo "ERROR: $1 requires an invite value" >&2; exit 1; fi
       invite="$2"; shift 2
-      "$BIN_PATH" agent enroll --invite "$invite" --install-service "$@"
+      case "${RELAYPILOT_INSTALL_ENROLL_MODE:-}" in
+        join|interactive)
+          "$BIN_PATH" agent join --invite "$invite" "$@"
+          ;;
+        auto|noninteractive)
+          "$BIN_PATH" agent enroll --invite "$invite" --install-service "$@"
+          ;;
+        *)
+          if [[ -t 0 && -t 1 ]]; then
+            "$BIN_PATH" agent join --invite "$invite" "$@"
+          else
+            "$BIN_PATH" agent enroll --invite "$invite" --install-service "$@"
+          fi
+          ;;
+      esac
       ;;
     --bundle)
       if [[ $# -lt 2 ]]; then echo "ERROR: --bundle requires a value" >&2; exit 1; fi
