@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="${RELAYPILOT_VERSION:-0.1.7}"
+VERSION="${RELAYPILOT_VERSION:-0.1.8}"
 REPO="${REPO:-jiwen77/relaypilot}"
 RAW_REF="${RAW_REF:-main}"
 RAW_BASE="${RAW_BASE:-https://github.com/${REPO}/raw/${RAW_REF}}"
@@ -237,7 +237,7 @@ Usage:
   bash relaypilot.sh bot register
   bash relaypilot.sh install
   bash relaypilot.sh update
-  bash relaypilot.sh update --version v0.1.7 --restart-services
+  bash relaypilot.sh update --version v0.1.8 --restart-services
   bash relaypilot.sh leave-hub  # remove Agent service/Hub credentials, keep Reality/SS/sing-box
   bash relaypilot.sh uninstall --dry-run
   bash relaypilot.sh uninstall --yes
@@ -453,7 +453,7 @@ select_agent_role() {
 select_ip_mode() {
   local var_name="$1" default="${2:-static}"
   select_option "$var_name" "节点 IP 模式" "$default" \
-    "static|静态 IP/域名|不额外检测公网 IP" \
+    "static|静态 IP/DDNS|不额外检测公网 IP" \
     "dynamic|动态 IP|低频上报公网 IP"
 }
 

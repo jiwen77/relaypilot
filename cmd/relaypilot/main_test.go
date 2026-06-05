@@ -490,6 +490,207 @@ func TestHubDecommissionQueuesDryRunAndRequiresExactConfirm(t *testing.T) {
 	}
 }
 
+func TestHubViewCachesReturnCopiesAndInvalidate(t *testing.T) {
+	state := t.TempDir()
+	nowTs := now()
+	reg := defaultHubRegistry()
+	reg["agents"] = obj{
+		"transit-a": obj{
+			"kind":      agentRegistrationKind,
+			"version":   version,
+			"id":        "transit-a",
+			"role":      "transit",
+			"name":      "Transit A",
+			"last_seen": nowTs,
+			"topology": obj{"links": []any{
+				obj{"auth_user": "user-a", "endpoint_name": "a", "outbound_tag": "landing-a-ss"},
+			}},
+		},
+		"landing-a": obj{
+			"kind":      agentRegistrationKind,
+			"version":   version,
+			"id":        "landing-a",
+			"role":      "landing",
+			"name":      "Landing A",
+			"last_seen": nowTs,
+			"topology": obj{"endpoints": []any{
+				obj{"name": "a", "tag": "landing-a-ss"},
+			}},
+		},
+	}
+	if err := saveHubRegistry(state, reg); err != nil {
+		t.Fatal(err)
+	}
+	agents, err := listHubAgents(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agents[0]["name"] = "mutated"
+	agentsAgain, err := listHubAgents(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, agent := range agentsAgain {
+		if str(agent["name"]) == "mutated" {
+			t.Fatalf("agent cache returned mutable data: %#v", agentsAgain)
+		}
+	}
+	topology, err := cachedHubTopologyText(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(topology, "landing-a") {
+		t.Fatalf("topology = %s", topology)
+	}
+	related, err := cachedRelatedAgentsForAgent(state, "transit-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(related) != 1 || str(related[0].agent["id"]) != "landing-a" {
+		t.Fatalf("related = %#v", related)
+	}
+	reg["agents"] = obj{
+		"transit-a": asObj(asObj(reg["agents"])["transit-a"]),
+		"landing-b": obj{
+			"kind":      agentRegistrationKind,
+			"version":   version,
+			"id":        "landing-b",
+			"role":      "landing",
+			"name":      "Landing B",
+			"last_seen": nowTs,
+			"labels":    obj{"transit": "transit-a"},
+		},
+	}
+	if err := saveHubRegistry(state, reg); err != nil {
+		t.Fatal(err)
+	}
+	topology, err = cachedHubTopologyText(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(topology, "landing-a") || !strings.Contains(topology, "landing-b") {
+		t.Fatalf("stale topology cache = %s", topology)
+	}
+	related, err = cachedRelatedAgentsForAgent(state, "transit-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(related) != 1 || str(related[0].agent["id"]) != "landing-b" {
+		t.Fatalf("stale related cache = %#v", related)
+	}
+	task, err := createHubTask(state, asObj(asObj(reg["agents"])["transit-a"]), "status", nil, "batch-a", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tasks, err := listHubTasks(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tasks[0]["status"] = "done"
+	tasksAgain, err := listHubTasks(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if str(tasksAgain[0]["status"]) != "queued" {
+		t.Fatalf("task cache returned mutable data: %#v", tasksAgain)
+	}
+	if _, err := completeHubTask(state, str(task["id"]), "transit-a", obj{"success": true, "text": "ok"}); err != nil {
+		t.Fatal(err)
+	}
+	tasksAgain, err = listHubTasks(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if str(tasksAgain[0]["status"]) != "done" {
+		t.Fatalf("stale task cache: %#v", tasksAgain)
+	}
+}
+
+func TestHubViewCachesExpireByMaxAge(t *testing.T) {
+	state := t.TempDir()
+	nowTs := now()
+	reg := defaultHubRegistry()
+	reg["agents"] = obj{
+		"transit-age": obj{
+			"kind":      agentRegistrationKind,
+			"version":   version,
+			"id":        "transit-age",
+			"role":      "transit",
+			"name":      "Transit Age",
+			"last_seen": nowTs,
+			"topology": obj{"links": []any{
+				obj{"endpoint_name": "age", "outbound_tag": "landing-age-ss"},
+			}},
+		},
+		"landing-age": obj{
+			"kind":      agentRegistrationKind,
+			"version":   version,
+			"id":        "landing-age",
+			"role":      "landing",
+			"name":      "Landing Age",
+			"last_seen": nowTs,
+			"topology": obj{"endpoints": []any{
+				obj{"name": "age", "tag": "landing-age-ss"},
+			}},
+		},
+	}
+	if err := saveHubRegistry(state, reg); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := listHubAgents(state); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cachedHubTopologyText(state); err != nil {
+		t.Fatal(err)
+	}
+	hubViewCache.Lock()
+	agentEntry := hubViewCache.agents[state]
+	agentEntry.agents[0]["name"] = "Expired Agent Cache"
+	agentEntry.cachedAt = time.Now().Add(-hubAgentCacheMaxAge - time.Second)
+	hubViewCache.agents[state] = agentEntry
+	topologyEntry := hubViewCache.topology[state]
+	topologyEntry.topologyText = "Expired Topology Cache"
+	topologyEntry.cachedAt = time.Now().Add(-hubTopologyCacheMaxAge - time.Second)
+	hubViewCache.topology[state] = topologyEntry
+	hubViewCache.Unlock()
+	agents, err := listHubAgents(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, agent := range agents {
+		if str(agent["name"]) == "Expired Agent Cache" {
+			t.Fatalf("expired agent cache reused: %#v", agents)
+		}
+	}
+	topology, err := cachedHubTopologyText(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if topology == "Expired Topology Cache" || !strings.Contains(topology, "landing-age") {
+		t.Fatalf("expired topology cache reused: %s", topology)
+	}
+	task, err := createHubTask(state, asObj(asObj(reg["agents"])["transit-age"]), "status", nil, "batch-age", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := listHubTasks(state); err != nil {
+		t.Fatal(err)
+	}
+	hubViewCache.Lock()
+	taskEntry := hubViewCache.tasks[state]
+	taskEntry.tasks[0]["status"] = "failed"
+	taskEntry.cachedAt = time.Now().Add(-hubTaskCacheMaxAge - time.Second)
+	hubViewCache.tasks[state] = taskEntry
+	hubViewCache.Unlock()
+	tasks, err := listHubTasks(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if str(tasks[0]["status"]) != "queued" || str(tasks[0]["id"]) != str(task["id"]) {
+		t.Fatalf("expired task cache reused: %#v", tasks)
+	}
+}
+
 func TestHubLinkQueuesDetailRefreshWhenEndpointSnapshotMissing(t *testing.T) {
 	root := t.TempDir()
 	state := filepath.Join(root, "hub")
@@ -1956,7 +2157,7 @@ func TestHubDispatchTopologySelectorsAndHubDoctor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(status, "异常：1 离线") || !strings.Contains(status, "查看链路：/topology") {
+	if !strings.Contains(status, "异常：1 离线") || !strings.Contains(status, "巡检：面板 → 刷新节点详情") {
 		t.Fatalf("status text = %s", status)
 	}
 	agents, err := hubDispatchCommand(state, "/agents")
@@ -2005,35 +2206,149 @@ func TestHubDispatchTopologySelectorsAndHubDoctor(t *testing.T) {
 func TestTelegramHubUpdateDispatchAndAPIEncoding(t *testing.T) {
 	root := t.TempDir()
 	state := filepath.Join(root, "hub")
+	nowTs := now()
 	reg := defaultHubRegistry()
-	reg["agents"] = obj{"transit-hk": obj{"kind": agentRegistrationKind, "version": version, "id": "transit-hk", "role": "transit", "name": "HK Transit", "transport": "poll"}}
+	reg["agents"] = obj{"transit-hk": obj{
+		"kind":      agentRegistrationKind,
+		"version":   version,
+		"id":        "transit-hk",
+		"role":      "transit",
+		"name":      "HK Transit",
+		"transport": "poll",
+		"labels":    obj{"region": "hk"},
+		"last_seen": nowTs,
+		"sync_at":   nowTs - 180,
+		"network": obj{
+			"ip_mode":   "dynamic",
+			"public_ip": "8.8.8.8",
+			"location":  obj{"label": "中国香港", "ip": "8.8.8.8"},
+		},
+		"topology": obj{"links": []any{
+			obj{"auth_user": "user-hk", "outbound_tag": "landing-hk-ss", "endpoint_name": "hk", "server": "203.0.113.20", "server_port": 443},
+		}},
+	}, "landing-hk": obj{
+		"kind":      agentRegistrationKind,
+		"version":   version,
+		"id":        "landing-hk",
+		"role":      "landing",
+		"name":      "HK Landing",
+		"transport": "poll",
+		"labels":    obj{"region": "hk"},
+		"last_seen": nowTs,
+		"sync_at":   nowTs - 240,
+		"topology": obj{"endpoints": []any{
+			obj{"name": "hk", "tag": "landing-hk-ss", "server": "203.0.113.20", "server_port": 443},
+		}},
+	}}
 	if err := saveHubRegistry(state, reg); err != nil {
 		t.Fatal(err)
 	}
 	reply := handleTelegramHubUpdate(state, obj{"update_id": 1, "message": obj{"text": "/status"}})
-	if !strings.Contains(reply, "Hub 管理面正常") {
-		t.Fatalf("reply = %s", reply)
+	if reply != "" {
+		t.Fatalf("unprefixed /status should be ignored to avoid cross-service conflicts: %s", reply)
 	}
 	prefixedReply := handleTelegramHubUpdate(state, obj{"update_id": 2, "message": obj{"text": "/relaypilot_status"}})
 	if !strings.Contains(prefixedReply, "Hub 管理面正常") {
 		t.Fatalf("prefixed reply = %s", prefixedReply)
 	}
-	panelReply := handleTelegramHubReply(state, obj{"update_id": 4, "message": obj{"text": "/start", "chat": obj{"id": "999"}}})
+	startReply := handleTelegramHubReply(state, obj{"update_id": 4, "message": obj{"text": "/start", "chat": obj{"id": "999"}}})
+	if startReply.Text != "" || len(startReply.ReplyMarkup) != 0 {
+		t.Fatalf("/start should be ignored to avoid cross-service conflicts: %#v", startReply)
+	}
+	panelReply := handleTelegramHubReply(state, obj{"update_id": 4, "message": obj{"text": "/relaypilot", "chat": obj{"id": "999"}}})
 	if !strings.Contains(panelReply.Text, "RelayPilot 控制中枢") || panelReply.ParseMode != "HTML" || len(panelReply.ReplyMarkup) == 0 {
 		t.Fatalf("panel reply = %#v", panelReply)
+	}
+	legacyPanelReply := handleTelegramHubReply(state, obj{"update_id": 15, "message": obj{"text": "/relaypilot_panel", "chat": obj{"id": "999"}}})
+	if !strings.Contains(legacyPanelReply.Text, "RelayPilot 控制中枢") {
+		t.Fatalf("legacy panel alias should remain compatible: %#v", legacyPanelReply)
 	}
 	panelMarkup, _ := json.Marshal(panelReply.ReplyMarkup)
 	if strings.Contains(panelReply.Text, "下一步") || strings.Contains(panelReply.Text, "任务结果") {
 		t.Fatalf("panel should not expose next-step/task wording: text=%s", panelReply.Text)
 	}
-	if !strings.Contains(panelReply.Text, "最近操作") || !bytes.Contains(panelMarkup, []byte("rp:sync_all")) || !bytes.Contains(panelMarkup, []byte("rp:probe_help")) || !bytes.Contains(panelMarkup, []byte("最近操作")) {
-		t.Fatalf("panel should surface status actions: text=%s markup=%s", panelReply.Text, panelMarkup)
+	if !strings.Contains(panelReply.Text, "最近操作") || !bytes.Contains(panelMarkup, []byte("rp:agents")) || !bytes.Contains(panelMarkup, []byte("rp:topology")) || !bytes.Contains(panelMarkup, []byte("rp:results")) || !bytes.Contains(panelMarkup, []byte("rp:update")) || !bytes.Contains(panelMarkup, []byte("节点列表")) || !bytes.Contains(panelMarkup, []byte("拓扑")) || !bytes.Contains(panelMarkup, []byte("最近操作")) || !bytes.Contains(panelMarkup, []byte("更新中心")) {
+		t.Fatalf("panel should surface four primary entries: text=%s markup=%s", panelReply.Text, panelMarkup)
+	}
+	if strings.Contains(panelReply.Text, "常用操作") || strings.Contains(panelReply.Text, "命令菜单") || bytes.Contains(panelMarkup, []byte("GitHub")) || bytes.Contains(panelMarkup, []byte("刷新面板")) || bytes.Contains(panelMarkup, []byte("刷新节点详情")) || bytes.Contains(panelMarkup, []byte("链路检测")) || bytes.Contains(panelMarkup, []byte("rp:sync_all")) || bytes.Contains(panelMarkup, []byte("rp:probe_help")) {
+		t.Fatalf("panel should avoid utility buttons and explanatory clutter: text=%s markup=%s", panelReply.Text, panelMarkup)
 	}
 	if bytes.Contains(panelMarkup, []byte("rp:guide")) || bytes.Contains(panelMarkup, []byte("操作向导")) {
 		t.Fatalf("telegram hub panel should not expose operation guide as a main action, markup=%s", panelMarkup)
 	}
 	if bytes.Contains(panelMarkup, []byte("生成")) || bytes.Contains(panelMarkup, []byte("导出")) {
 		t.Fatalf("telegram hub panel should stay status-focused, markup=%s", panelMarkup)
+	}
+	agentsReply := handleTelegramHubReply(state, obj{"update_id": 16, "callback_query": obj{"data": "rp:agents", "message": obj{"chat": obj{"id": "999"}}}})
+	agentsMarkup, _ := json.Marshal(agentsReply.ReplyMarkup)
+	if !strings.Contains(agentsReply.Text, "节点列表") || !bytes.Contains(agentsMarkup, []byte("刷新节点详情")) || !bytes.Contains(agentsMarkup, []byte("rp:sync_all")) || !bytes.Contains(agentsMarkup, []byte("rp:agent:transit-hk")) {
+		t.Fatalf("agents page should expose node detail refresh: %#v markup=%s", agentsReply, agentsMarkup)
+	}
+	nodeDetail := handleTelegramHubReply(state, obj{"update_id": 18, "callback_query": obj{"data": "rp:agent:transit-hk", "message": obj{"chat": obj{"id": "999"}}}})
+	nodeDetailMarkup, _ := json.Marshal(nodeDetail.ReplyMarkup)
+	for _, want := range []string{"ID：", "transit-hk", "角色：中转", "状态：在线", "网络：动态", "IP 8.8.x.x", "位置 中国香港", "详情：上次刷新"} {
+		if !strings.Contains(nodeDetail.Text, want) {
+			t.Fatalf("node detail missing %q: %#v", want, nodeDetail)
+		}
+	}
+	if strings.Contains(nodeDetail.Text, "8.8.8.8") {
+		t.Fatalf("node detail should mask IPs: %#v", nodeDetail)
+	}
+	for _, want := range [][]byte{
+		[]byte("rp:agent:sync:transit-hk"),
+		[]byte("rp:agent:doctor:transit-hk"),
+		[]byte("rp:agent:related:transit-hk"),
+		[]byte("rp:agent:results:transit-hk"),
+		[]byte("rp:agent:retire:transit-hk"),
+		[]byte("rp:agents"),
+	} {
+		if !bytes.Contains(nodeDetailMarkup, want) {
+			t.Fatalf("node detail missing callback %s: markup=%s", want, nodeDetailMarkup)
+		}
+	}
+	if bytes.Contains(nodeDetailMarkup, []byte("Endpoints")) || bytes.Contains(nodeDetailMarkup, []byte("更新节点")) || bytes.Contains(nodeDetailMarkup, []byte("rp:agent:endpoints")) || bytes.Contains(nodeDetailMarkup, []byte("rp:agent:update")) {
+		t.Fatalf("node detail should not expose endpoint/update buttons: markup=%s", nodeDetailMarkup)
+	}
+	nodeSync := handleTelegramHubReply(state, obj{"update_id": 20, "callback_query": obj{"data": "rp:agent:sync:transit-hk", "message": obj{"chat": obj{"id": "999"}}}})
+	if !strings.Contains(nodeSync.Text, "已下发节点详情刷新") {
+		t.Fatalf("node sync reply = %#v", nodeSync)
+	}
+	nodeDoctor := handleTelegramHubReply(state, obj{"update_id": 21, "callback_query": obj{"data": "rp:agent:doctor:transit-hk", "message": obj{"chat": obj{"id": "999"}}}})
+	if !strings.Contains(nodeDoctor.Text, "已下发 /doctor") || !strings.Contains(nodeDoctor.Text, "transit-hk") {
+		t.Fatalf("node doctor reply = %#v", nodeDoctor)
+	}
+	nodeRelated := handleTelegramHubReply(state, obj{"update_id": 22, "callback_query": obj{"data": "rp:agent:related:transit-hk", "message": obj{"chat": obj{"id": "999"}}}})
+	nodeRelatedMarkup, _ := json.Marshal(nodeRelated.ReplyMarkup)
+	if !strings.Contains(nodeRelated.Text, "关联节点") || !strings.Contains(nodeRelated.Text, "landing-hk") || !strings.Contains(nodeRelated.Text, "user:user-hk") || !bytes.Contains(nodeRelatedMarkup, []byte("rp:agent:landing-hk")) {
+		t.Fatalf("node related reply = %#v markup=%s", nodeRelated, nodeRelatedMarkup)
+	}
+	nodeResults := handleTelegramHubReply(state, obj{"update_id": 23, "callback_query": obj{"data": "rp:agent:results:transit-hk", "message": obj{"chat": obj{"id": "999"}}}})
+	if !strings.Contains(nodeResults.Text, "transit-hk") || strings.Contains(nodeResults.Text, "任务结果") {
+		t.Fatalf("node results reply = %#v", nodeResults)
+	}
+	retireReply := handleTelegramHubReply(state, obj{"update_id": 24, "callback_query": obj{"data": "rp:agent:retire:transit-hk", "message": obj{"chat": obj{"id": "999"}}}})
+	retireMarkup, _ := json.Marshal(retireReply.ReplyMarkup)
+	if !strings.Contains(retireReply.Text, "退役节点") || !strings.Contains(retireReply.Text, "确认后才执行") || !bytes.Contains(retireMarkup, []byte("rp:agent:retire-mode:uninstall:transit-hk")) {
+		t.Fatalf("retire picker = %#v markup=%s", retireReply, retireMarkup)
+	}
+	retireConfirm := handleTelegramHubReply(state, obj{"update_id": 25, "callback_query": obj{"data": "rp:agent:retire-mode:uninstall:transit-hk", "message": obj{"chat": obj{"id": "999"}}}})
+	retireConfirmMarkup, _ := json.Marshal(retireConfirm.ReplyMarkup)
+	if !strings.Contains(retireConfirm.Text, "确认退役") || !strings.Contains(retireConfirm.Text, "彻底卸载") || !bytes.Contains(retireConfirmMarkup, []byte("rp:agent:retire-confirm:uninstall:transit-hk")) || !bytes.Contains(retireConfirmMarkup, []byte("rp:agent:retire-preview:uninstall:transit-hk")) {
+		t.Fatalf("retire confirmation = %#v markup=%s", retireConfirm, retireConfirmMarkup)
+	}
+	retirePreview := handleTelegramHubReply(state, obj{"update_id": 26, "callback_query": obj{"data": "rp:agent:retire-preview:uninstall:transit-hk", "message": obj{"chat": obj{"id": "999"}}}})
+	retirePreviewMarkup, _ := json.Marshal(retirePreview.ReplyMarkup)
+	if !strings.Contains(retirePreview.Text, "退役预览") || !bytes.Contains(retirePreviewMarkup, []byte("rp:agent:retire-confirm:uninstall:transit-hk")) {
+		t.Fatalf("retire preview = %#v markup=%s", retirePreview, retirePreviewMarkup)
+	}
+	retireExecute := handleTelegramHubReply(state, obj{"update_id": 27, "callback_query": obj{"data": "rp:agent:retire-confirm:uninstall:transit-hk", "message": obj{"chat": obj{"id": "999"}}}})
+	if !strings.Contains(retireExecute.Text, "已下发远程退役") || !strings.Contains(retireExecute.Text, "transit-hk") {
+		t.Fatalf("retire execute = %#v", retireExecute)
+	}
+	topologyReply := handleTelegramHubReply(state, obj{"update_id": 17, "callback_query": obj{"data": "rp:topology", "message": obj{"chat": obj{"id": "999"}}}})
+	topologyMarkup, _ := json.Marshal(topologyReply.ReplyMarkup)
+	if !strings.Contains(topologyReply.Text, "转发拓扑") || !bytes.Contains(topologyMarkup, []byte("链路检测")) || !bytes.Contains(topologyMarkup, []byte("rp:probe_help")) {
+		t.Fatalf("topology page should expose link probe: %#v markup=%s", topologyReply, topologyMarkup)
 	}
 	probeHelp := handleTelegramHubReply(state, obj{"update_id": 8, "callback_query": obj{"data": "rp:probe_help", "message": obj{"chat": obj{"id": "999"}}}})
 	if !strings.Contains(probeHelp.Text, "链路检测") || !strings.Contains(probeHelp.Text, "/relaypilot_probe") || !strings.Contains(probeHelp.Text, "不会启动后台监控") {
@@ -2044,8 +2359,44 @@ func TestTelegramHubUpdateDispatchAndAPIEncoding(t *testing.T) {
 		t.Fatalf("sync reply = %#v", syncReply)
 	}
 	updateReply := handleTelegramHubReply(state, obj{"update_id": 5, "callback_query": obj{"data": "rp:update", "message": obj{"chat": obj{"id": "999"}}}})
-	if !strings.Contains(updateReply.Text, "<code>/relaypilot_update hub ") || !strings.Contains(updateReply.Text, "--restart</code>") {
-		t.Fatalf("update reply = %#v", updateReply)
+	updateMarkup, _ := json.Marshal(updateReply.ReplyMarkup)
+	if strings.Contains(updateReply.Text, "/relaypilot_up") || strings.Contains(updateReply.Text, "/relaypilot_update") || !strings.Contains(updateReply.Text, "默认：latest + 重启") || !bytes.Contains(updateMarkup, []byte("rp:upd:agent")) {
+		t.Fatalf("update center should stay button-first without command clutter: %#v", updateReply)
+	}
+	agentUpdateMenu := handleTelegramHubReply(state, obj{"update_id": 9, "callback_query": obj{"data": "rp:upd:agent", "message": obj{"chat": obj{"id": "999"}}}})
+	agentUpdateMarkup, _ := json.Marshal(agentUpdateMenu.ReplyMarkup)
+	if !strings.Contains(agentUpdateMenu.Text, "选择 Agent 更新范围") || !bytes.Contains(agentUpdateMarkup, []byte("rp:upd:agent:all")) || !bytes.Contains(agentUpdateMarkup, []byte("rp:upd:agent:transit-hk")) {
+		t.Fatalf("agent update menu = %#v markup=%s", agentUpdateMenu, agentUpdateMarkup)
+	}
+	confirmUpdate := handleTelegramHubReply(state, obj{"update_id": 10, "callback_query": obj{"data": "rp:upd:agent:transit-hk", "message": obj{"chat": obj{"id": "999"}}}})
+	confirmMarkup, _ := json.Marshal(confirmUpdate.ReplyMarkup)
+	if !strings.Contains(confirmUpdate.Text, "确认更新") || !strings.Contains(confirmUpdate.Text, "目标：Agent：transit-hk") || strings.Contains(confirmUpdate.Text, "/relaypilot_up") || !bytes.Contains(confirmMarkup, []byte("rp:upd:run:transit-hk")) {
+		t.Fatalf("confirm update should show target and remain button-first: %#v markup=%s", confirmUpdate, confirmMarkup)
+	}
+	hubConfirm := handleTelegramHubReply(state, obj{"update_id": 13, "callback_query": obj{"data": "rp:upd:hub", "message": obj{"chat": obj{"id": "999"}}}})
+	if !strings.Contains(hubConfirm.Text, "目标：Hub") || strings.Contains(hubConfirm.Text, "Agent 轮询领取") {
+		t.Fatalf("hub confirm should show hub-specific target/effect: %#v", hubConfirm)
+	}
+	emptyState := filepath.Join(root, "empty-hub")
+	if err := saveHubRegistry(emptyState, defaultHubRegistry()); err != nil {
+		t.Fatal(err)
+	}
+	emptyAgentMenu := handleTelegramHubReply(emptyState, obj{"update_id": 14, "callback_query": obj{"data": "rp:upd:agent", "message": obj{"chat": obj{"id": "999"}}}})
+	emptyAgentMarkup, _ := json.Marshal(emptyAgentMenu.ReplyMarkup)
+	if !strings.Contains(emptyAgentMenu.Text, "当前没有已接入 Agent") || bytes.Contains(emptyAgentMarkup, []byte("rp:upd:agent:all")) || bytes.Contains(emptyAgentMarkup, []byte("Transit")) {
+		t.Fatalf("empty agent update menu should not offer unusable ranges: %#v markup=%s", emptyAgentMenu, emptyAgentMarkup)
+	}
+	buttonUpdate := handleTelegramHubReply(state, obj{"update_id": 11, "callback_query": obj{"data": "rp:upd:run:transit-hk", "message": obj{"chat": obj{"id": "999"}}}})
+	if !strings.Contains(buttonUpdate.Text, "已下发 RelayPilot 更新") || !strings.Contains(buttonUpdate.Text, "版本：latest") || !strings.Contains(buttonUpdate.Text, "重启服务：yes") {
+		t.Fatalf("button update reply = %#v", buttonUpdate)
+	}
+	shortUpdate := handleTelegramHubUpdate(state, obj{"update_id": 6, "message": obj{"text": "/relaypilot_up transit-hk", "chat": obj{"id": "999"}}})
+	if !strings.Contains(shortUpdate, "已下发 RelayPilot 更新") || !strings.Contains(shortUpdate, "版本：latest") || !strings.Contains(shortUpdate, "重启服务：yes") {
+		t.Fatalf("short update reply = %s", shortUpdate)
+	}
+	unprefixedUpdate := handleTelegramHubUpdate(state, obj{"update_id": 12, "message": obj{"text": "/up transit-hk", "chat": obj{"id": "999"}}})
+	if unprefixedUpdate != "" {
+		t.Fatalf("unprefixed update should be ignored to avoid cross-service conflicts: %s", unprefixedUpdate)
 	}
 	queued := handleTelegramHubUpdate(state, obj{"update_id": 3, "message": obj{"text": "/relaypilot_status transit-hk", "chat": obj{"id": "999"}}})
 	if !strings.Contains(queued, "已下发 /status") {
@@ -2077,6 +2428,26 @@ func TestTelegramHubUpdateDispatchAndAPIEncoding(t *testing.T) {
 	if len(task) == 0 {
 		t.Fatalf("status task missing: %#v", tasks)
 	}
+	var updateTask obj
+	for _, candidate := range tasks {
+		if candidate["agent_id"] == "transit-hk" && candidate["command"] == "self_update" {
+			updateTask = candidate
+			break
+		}
+	}
+	if len(updateTask) == 0 || !truthy(asObj(updateTask["payload"])["restart_services"]) || len(asList(updateTask["args"])) != 1 || str(asList(updateTask["args"])[0]) != "latest" {
+		t.Fatalf("short update task missing or wrong: %#v", tasks)
+	}
+	var destructiveRetireTask obj
+	for _, candidate := range tasks {
+		if candidate["agent_id"] == "transit-hk" && candidate["command"] == "decommission_agent" && str(candidate["origin_text"]) == "/decommission transit-hk --mode uninstall --confirm transit-hk" {
+			destructiveRetireTask = candidate
+			break
+		}
+	}
+	if len(destructiveRetireTask) == 0 || truthy(asObj(destructiveRetireTask["payload"])["dry_run"]) {
+		t.Fatalf("confirmed retire task missing or not destructive: %#v", tasks)
+	}
 	if _, err := completeHubTask(state, str(task["id"]), "transit-hk", obj{"success": true, "command": "status", "text": "agent ok"}); err != nil {
 		t.Fatal(err)
 	}
@@ -2104,8 +2475,12 @@ func TestTelegramHubUpdateDispatchAndAPIEncoding(t *testing.T) {
 		t.Fatalf("telegram status = %#v", status)
 	}
 	cmdText := formatTelegramCommands(false, true)
-	if !strings.Contains(cmdText, "/relaypilot_topology") || !strings.Contains(cmdText, "/relaypilot_results") {
-		t.Fatalf("hub commands = %s", cmdText)
+	if strings.TrimSpace(cmdText) != "/relaypilot — Open RelayPilot Hub panel" || strings.Contains(cmdText, "/relaypilot_panel") || strings.Contains(cmdText, "/relaypilot_status") || strings.Contains(cmdText, "/relaypilot_up") || strings.Contains(cmdText, "/relaypilot_topology") || strings.Contains(cmdText, "/relaypilot_decommission") {
+		t.Fatalf("hub commands should expose only the RelayPilot panel entry: %s", cmdText)
+	}
+	hubCmdJSON := selectedTelegramCommands(true)
+	if len(hubCmdJSON) != 1 || str(hubCmdJSON[0]["command"]) != "relaypilot" {
+		t.Fatalf("hub command menu should stay /relaypilot-only: %#v", hubCmdJSON)
 	}
 	cmdJSON := selectedTelegramCommands(false)
 	if len(cmdJSON) == 0 || str(cmdJSON[0]["command"]) != "relaypilot_help" {
@@ -2123,7 +2498,8 @@ func TestTelegramHubUpdateDispatchAndAPIEncoding(t *testing.T) {
 		t.Fatal(err)
 	}
 	payload := asObj(dryRegister["payload"])
-	if dryRegister["method"] != "setMyCommands" || strings.Contains(str(dryRegister["url"]), "SECRET_TOKEN") || !strings.Contains(str(payload["commands"]), "topology") {
+	commandsPayload := str(payload["commands"])
+	if dryRegister["method"] != "setMyCommands" || strings.Contains(str(dryRegister["url"]), "SECRET_TOKEN") || strings.Contains(commandsPayload, "decommission") || strings.Contains(commandsPayload, "topology") || strings.Contains(commandsPayload, "relaypilot_up") || strings.Contains(commandsPayload, "relaypilot_status") || strings.Contains(commandsPayload, "relaypilot_panel") || !strings.Contains(commandsPayload, "relaypilot") {
 		t.Fatalf("dry register = %#v", dryRegister)
 	}
 	drySend, err := sendTelegramMessageCLI(state, "hello", "", true)
@@ -2440,7 +2816,7 @@ func TestResourceGuardsLimitJSONHTTPAndTaskBatch(t *testing.T) {
 	}
 }
 
-func TestAgentPollerHeartbeatIsMinimal(t *testing.T) {
+func TestAgentPollerStaticHeartbeatIsMinimal(t *testing.T) {
 	state := t.TempDir()
 	registration, err := buildHubAgentRegistration("agent-a", "landing", "Agent A", "")
 	if err != nil {
@@ -2457,7 +2833,7 @@ func TestAgentPollerHeartbeatIsMinimal(t *testing.T) {
 
 	probes := 0
 	poller := newAgentPoller(srv.URL, "agent-a", "secret", "landing", state, "", 0, time.Second, 0)
-	poller.ipMode = "dynamic"
+	poller.ipMode = "static"
 	poller.publicIPInterval = time.Hour
 	poller.publicIPProbe = func(time.Duration) (string, error) {
 		probes++
@@ -2469,7 +2845,7 @@ func TestAgentPollerHeartbeatIsMinimal(t *testing.T) {
 		}
 	}
 	if probes != 0 {
-		t.Fatalf("heartbeat should not probe public IP, got %d", probes)
+		t.Fatalf("static heartbeat should not probe public IP, got %d", probes)
 	}
 	agents, err := listHubAgents(state)
 	if err != nil {
@@ -2521,18 +2897,18 @@ func TestUpdateAgentIPModePreservesEnrollment(t *testing.T) {
 	}
 }
 
-func TestHeartbeatNetworkPayloadIsMinimal(t *testing.T) {
+func TestStaticHeartbeatNetworkPayloadIsMinimal(t *testing.T) {
 	poller := newAgentPoller("http://127.0.0.1", "agent-a", "secret", "landing", t.TempDir(), "", 0, time.Second, 0)
-	poller.ipMode = "dynamic"
+	poller.ipMode = "static"
 	network := poller.network()
 	if len(network) != 1 || network["reported_at"] == nil {
 		t.Fatalf("network payload = %#v", network)
 	}
 }
 
-func TestHeartbeatDoesNotCallPublicIPProbe(t *testing.T) {
+func TestStaticHeartbeatDoesNotCallPublicIPProbe(t *testing.T) {
 	poller := newAgentPoller("http://127.0.0.1", "agent-a", "secret", "landing", t.TempDir(), "", 0, 30*time.Second, 0)
-	poller.ipMode = "dynamic"
+	poller.ipMode = "static"
 	called := false
 	poller.publicIPProbe = func(timeout time.Duration) (string, error) {
 		called = true
@@ -2540,7 +2916,26 @@ func TestHeartbeatDoesNotCallPublicIPProbe(t *testing.T) {
 	}
 	_ = poller.network()
 	if called {
-		t.Fatal("heartbeat network path should not invoke public IP probe")
+		t.Fatal("static heartbeat network path should not invoke public IP probe")
+	}
+}
+
+func TestDynamicHeartbeatReportsAndCachesPublicIP(t *testing.T) {
+	poller := newAgentPoller("http://127.0.0.1", "agent-a", "secret", "landing", t.TempDir(), "", 0, 30*time.Second, 0)
+	poller.ipMode = "dynamic"
+	poller.publicIPInterval = time.Hour
+	calls := 0
+	poller.publicIPProbe = func(timeout time.Duration) (string, error) {
+		calls++
+		return "8.8.8.8", nil
+	}
+	network := poller.network()
+	if str(network["ip_mode"]) != "dynamic" || str(network["public_ip"]) != "8.8.8.8" || int64Value(network["public_ip_checked_at"]) == 0 || network["public_ip_error"] != nil {
+		t.Fatalf("dynamic network payload = %#v", network)
+	}
+	again := poller.network()
+	if calls != 1 || str(again["public_ip"]) != "8.8.8.8" {
+		t.Fatalf("public IP probe should be cached, calls=%d again=%#v", calls, again)
 	}
 }
 
@@ -2915,14 +3310,63 @@ func TestHubExportLandingConfigUsesSecureCache(t *testing.T) {
 	}
 }
 
-func TestFormatAgentsTextShowsSyncStatus(t *testing.T) {
+func TestFormatAgentsTextShowsCardRows(t *testing.T) {
+	n := now()
 	agents := []obj{
-		obj{"id": "a", "role": "transit", "name": "A", "last_seen": now(), "updated_at": now()},
-		obj{"id": "b", "role": "landing", "name": "B", "last_seen": now(), "updated_at": now(), "sync_at": now()},
+		obj{"id": "landing-jp", "role": "landing", "name": "JP Landing", "last_seen": n, "updated_at": n, "sync_at": n - 3*60, "network": obj{"observed_ip": "203.0.113.10", "location": obj{"ip": "203.0.113.10", "label": "日本·东京"}}},
+		obj{"id": "transit-us", "role": "transit", "name": "US Transit", "last_seen": n, "updated_at": n, "sync_at": n - 5*60, "network": obj{"ip_mode": "dynamic", "public_ip": "8.8.8.8", "location": obj{"ip": "8.8.8.8", "label": "美国·洛杉矶"}}},
 	}
 	text := formatAgentsText(agents)
-	if !strings.Contains(text, "未刷新详情") || !strings.Contains(text, "上次刷新") {
-		t.Fatalf("sync labels missing: %s", text)
+	for _, want := range []string{
+		"📡 节点列表：2",
+		"🟢 🛬 landing-jp · 落地 · JP Landing",
+		"   静态 · IP 203.0.x.x · 位置 日本·东京 · 上次刷新 3 分钟前",
+		"🟢 🛫 transit-us · 中转 · US Transit",
+		"   动态 · IP 8.8.x.x · 位置 美国·洛杉矶 · 上次刷新 5 分钟前",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing %q in:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "203.0.113.10") || strings.Contains(text, "8.8.8.8") {
+		t.Fatalf("agent list should mask IPs:\n%s", text)
+	}
+}
+
+func TestUpdateHeartbeatStoresGeoLocation(t *testing.T) {
+	oldResolver := hubIPLocationResolver
+	defer func() { hubIPLocationResolver = oldResolver }()
+	calls := 0
+	hubIPLocationResolver = func(ip string, timeout time.Duration) (obj, error) {
+		calls++
+		if ip != "8.8.8.8" {
+			t.Fatalf("lookup ip = %s", ip)
+		}
+		return obj{"country_code": "US", "country_name": "United States", "city": "Los Angeles", "source": "test"}, nil
+	}
+
+	state := t.TempDir()
+	reg := defaultHubRegistry()
+	reg["agents"] = obj{"landing-la": obj{"kind": agentRegistrationKind, "version": version, "id": "landing-la", "role": "landing", "name": "LA Landing", "transport": "poll"}}
+	if err := saveHubRegistry(state, reg); err != nil {
+		t.Fatal(err)
+	}
+	agent, err := updateHeartbeat(state, "landing-la", nil, nil, obj{"public_ip": "8.8.8.8"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	location := asObj(asObj(agent["network"])["location"])
+	if str(location["label"]) != "美国·洛杉矶" || str(location["ip"]) != "8.8.8.8" || int64Value(location["checked_at"]) == 0 {
+		t.Fatalf("location = %#v", location)
+	}
+	if text := formatAgentsText([]obj{agent}); !strings.Contains(text, "位置 美国·洛杉矶") {
+		t.Fatalf("agent list missing location: %s", text)
+	}
+	if _, err := updateHeartbeat(state, "landing-la", nil, nil, obj{"public_ip": "8.8.8.8"}); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("location lookup should be cached, calls=%d", calls)
 	}
 }
 

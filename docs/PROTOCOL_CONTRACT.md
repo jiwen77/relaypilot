@@ -298,7 +298,11 @@ GET  /healthz
 `register` accepts an agent registration document and refreshes `last_seen`.
 `heartbeat` accepts optional `topology`, `health`, and `network` objects. Hub
 stores `network.ip_mode`, optional `network.public_ip`, and the source
-`network.observed_ip` derived from the heartbeat connection. Fetching tasks
+`network.observed_ip` derived from the heartbeat connection. When a public IP is
+available, Hub may cache a low-frequency `network.location` object with
+`country`, `city`, `label`, `ip`, and `checked_at`; node lists render that label
+as `位置 ...`. Set `RELAYPILOT_GEOIP=0` on Hub to disable external GeoIP
+lookups. Fetching tasks
 leases queued tasks by marking them `running`; posting a result marks each task
 `done` or `failed` and stores the command output/error under `result`.
 

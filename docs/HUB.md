@@ -15,9 +15,14 @@ loops. In a fleet, only the Hub stores the Telegram bot token.
 
 ## Why this avoids duplicate replies
 
-- `/status` without a target is Hub-only.
-- Agent fanout is opt-in: `/status all`, `/status transit`, `/status landing`,
-  `/status transit-hk`, or `/status label:region=hk`.
+- Telegram messages must use `/relaypilot` or `/relaypilot_*`; generic commands
+  such as `/start`, `/status`, and `/up` are ignored by RelayPilot in Hub mode.
+- `/relaypilot_status` without a target is Hub-only.
+- Agent fanout is opt-in: `/relaypilot_status all`, `/relaypilot_status transit`,
+  `/relaypilot_status landing`, `/relaypilot_status transit-hk`, or
+  `/relaypilot_status label:region=hk`.
+- CLI `hub-dispatch` keeps short internal forms such as `/status all` for
+  automation and tests; those short forms are not registered in Telegram.
 - Agents never talk to Telegram directly in Hub mode; they report back to Hub.
 - Hub owns deduplication, authorization, task queueing, and result aggregation.
 
@@ -120,9 +125,14 @@ relaypilot agent ip-mode --mode static
 relaypilot agent ip-mode --mode dynamic --public-ip-interval 600
 ```
 
-The Hub also records the source IP it observes from each heartbeat. These fields
-are for visibility and future automation only; changing static/dynamic mode does
-not rewrite existing Reality, Shadowsocks, or WireGuard configuration.
+The Hub also records the source IP it observes from each heartbeat. Node lists
+display the selected IP mode (`静态` or `动态`), the reported/observed
+IP, and a cached GeoIP `位置` when available. These fields are for visibility
+and future automation only; changing static/dynamic mode does not rewrite
+existing Reality, Shadowsocks, or WireGuard configuration. Human-facing panels
+mask IP display to the first half, for example `203.0.x.x`; stored state keeps
+the original value for routing and diagnostics. GeoIP uses the configured
+third-party lookup endpoint and can be disabled with `RELAYPILOT_GEOIP=0`.
 
 For a node behind a fronting datacenter/static IP with port forwarding, configure
 the Agent public entry instead of relying on IP mode:
@@ -340,10 +350,14 @@ Data-plane apply defaults to `sing-box check` followed by service hot reload. If
 
 Telegram replies are optimized for quick human inspection:
 
-- normal `/status` does not include filesystem paths, task IDs, or config tags;
+- status replies do not include filesystem paths, task IDs, or config tags;
 - `/topology` shows the forwarding chain as a Transit -> Landing tree;
 - command routing replies show target count and node names only;
 - technical detail is reserved for `/doctor` and CLI `--json` output.
+- the Telegram panel keeps four primary entries: `节点列表`, `拓扑`, `最近操作`,
+  and `更新中心`;
+- node rows are clickable and open a node detail page with refresh, doctor,
+  related nodes, recent operations, and confirmed retirement actions.
 
 The display tree does not change the control-plane architecture. Hub still
 talks to transit and landing agents directly; the tree is only a presentation
@@ -353,8 +367,8 @@ Example:
 
 ```text
 🌐 转发拓扑：1 个中转 / 1 个落地
-└─ 🟢 🚦 transit-hk · HK Transit
-   └─ 🟢 🎯 landing-hk · HK Landing ← user:hk
+└─ 🟢 🛫 transit-hk · HK Transit
+   └─ 🟢 🛬 landing-hk · HK Landing ← user:hk
 🟢 在线  🟡 可能掉线  🔴 离线
 ```
 
@@ -487,21 +501,15 @@ relaypilot bot register --hub
 Hub command set:
 
 ```text
-/relaypilot_help
-/relaypilot_agents
-/relaypilot_topology
-/relaypilot_status [hub|all|transit|landing|agent_id]
-/relaypilot_doctor [hub|all|agent_id]
-/relaypilot_endpoints [all|transit|landing|agent_id]
-/relaypilot_show_endpoint <agent_id> <endpoint_name>
-/relaypilot_inspect_conf <agent_id> [path]
-/relaypilot_tasks
-/relaypilot_results [batch_id]
-/relaypilot_alerts
+/relaypilot
 ```
 
-Short aliases like `/status` and `/topology` remain accepted for compatibility,
-but the Telegram menu is namespaced with `relaypilot_`.
+The Telegram command menu is panel-only to avoid collisions with other services
+connected to the same bot/chat. Advanced namespaced commands such as
+`/relaypilot_status`, `/relaypilot_doctor`, `/relaypilot_endpoints`, and
+`/relaypilot_results` remain accepted manually for operators, but normal
+Telegram operation should use panel buttons. If an upgraded Hub still shows old
+Telegram commands, run `relaypilot bot register --hub` again.
 
 ## Dispatch examples
 
@@ -511,7 +519,7 @@ relaypilot hub-dispatch "/topology"
 relaypilot hub-dispatch "/status all"
 relaypilot hub-dispatch "/endpoints transit"
 relaypilot hub-dispatch "/show_endpoint landing-hk hk"
-relaypilot hub-dispatch "/update transit v0.1.7"
+relaypilot hub-dispatch "/update transit v0.1.8"
 relaypilot hub-tasks
 relaypilot hub-recover-tasks
 relaypilot hub-results

@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+## 0.1.8 - 2026-06-05
+
+- Move Telegram Hub update operations behind panel buttons with a final confirmation step; namespaced short commands remain as manual fallback.
+- Stop handling generic Telegram message commands such as `/start`, `/status`, and `/up` so other services connected to the same bot/chat can own them.
+- Keep the Telegram command menu to `/relaypilot`; advanced operations stay in the panel or manual namespaced commands.
+- Simplify Telegram panel copy and button labels, remove utility/external buttons from the main operation panel, and show update targets on confirmation.
+- Add clickable Telegram node rows with single-node detail, refresh, doctor, related-node, recent-operation, and confirmed retirement actions.
+- Add cached Hub-side GeoIP location enrichment for node lists, shown as fields such as `美国·洛杉矶` or `日本·东京` when a public node IP is available.
+- Mask human-facing IP display to the first half, for example `203.0.x.x`.
+- Document GeoIP privacy behavior and the `RELAYPILOT_GEOIP=0` opt-out.
+- Add mtime-invalidated in-process caches for Hub agent/task reads and topology relation views to avoid rebuilding unchanged Telegram/Hub panels.
+- Add passive max-age expiry for Hub view caches: 10s for agent/topology views and 5s for task views.
+- Split the Go command implementation into broader domain files while keeping the same package and behavior.
+
 ## 0.1.7
 
 - Default the interactive self-update prompt to restarting installed RelayPilot services so Hub/Agent/Bot daemons use the refreshed version immediately.

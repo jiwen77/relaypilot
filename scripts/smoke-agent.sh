@@ -294,9 +294,11 @@ HUB_SERVICE_CPU_QUOTA=33% \
 bash ./relaypilot.sh resource-profile > "$ROOT/profile-override.out"
 
 grep -q '/relaypilot_status' "$ROOT/tg-commands.out"
-grep -q '/relaypilot_panel' "$ROOT/tg-hub-commands.out"
-grep -q '/relaypilot_link' "$ROOT/tg-hub-commands.out"
-grep -q '/relaypilot_update' "$ROOT/tg-hub-commands.out"
+grep -q '/relaypilot' "$ROOT/tg-hub-commands.out"
+if grep -q '/relaypilot_panel\|/relaypilot_status\|/relaypilot_up\|/relaypilot_link\|/relaypilot_update\|/relaypilot_decommission\|/relaypilot_tasks' "$ROOT/tg-hub-commands.out"; then
+  echo "Hub Telegram command menu should stay minimal; advanced actions belong in panel/manual commands" >&2
+  exit 1
+fi
 grep -q '/relaypilot_status' "$ROOT/bot-commands.out"
 grep -q 'setMyCommands' "$ROOT/tg-register.out"
 ! grep -q 'SMOKE_TOKEN' "$ROOT/tg-register.out"
@@ -460,7 +462,7 @@ grep -q '"token": "smoke-token"' "$ROOT/hub-token.out"
 grep -q 'transit-hk' "$ROOT/hub-tokens.out"
 ! grep -q 'smoke-token' "$ROOT/hub-tokens.out"
 grep -q '"revoked": true' "$ROOT/hub-token-revoke.out"
-grep -q '默认不广播' "$ROOT/hub-status.out"
+grep -q '巡检：面板 → 刷新节点详情' "$ROOT/hub-status.out"
 grep -q '转发拓扑' "$ROOT/hub-topology.out"
 grep -q 'transit-hk' "$ROOT/hub-route.out"
 grep -q '已下发 RelayPilot 更新' "$ROOT/hub-update.out"

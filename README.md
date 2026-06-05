@@ -1,14 +1,19 @@
 # RelayPilot
 
-Secure, lightweight sing-box node orchestration for Hub-managed transit and landing relays. It works on NAT boxes, VPS, VDS, and dedicated servers.
+[![Tests](https://github.com/jiwen77/relaypilot/actions/workflows/test.yml/badge.svg)](https://github.com/jiwen77/relaypilot/actions/workflows/test.yml)
+[![Release](https://github.com/jiwen77/relaypilot/actions/workflows/release.yml/badge.svg)](https://github.com/jiwen77/relaypilot/actions/workflows/release.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Runtime: Go](https://img.shields.io/badge/runtime-Go%20stdlib-blue)](go.mod)
 
-Single user-facing script:
+RelayPilot is a secure, lightweight control plane for Hub-managed
+[sing-box](https://sing-box.sagernet.org/) transit and landing relays. It keeps
+the normal operator workflow simple: install one CLI, create short-lived Hub
+invites, enroll Agents, link transit → landing, and manage status from one
+Telegram panel.
 
 ```bash
-bash relaypilot.sh
+bash <(curl -fsSL https://github.com/jiwen77/relaypilot/raw/refs/heads/main/install-relaypilot.sh)
 ```
-
-Then choose by machine role:
 
 ```text
 RelayPilot
@@ -18,391 +23,281 @@ RelayPilot
 0) 退出
 ```
 
-- Hub machine: initialize Hub, generate Agent invites, manage Telegram/tasks.
-- Transit/Landing machine: choose Agent mode and paste the matching Hub invite. The join wizard then guides the local data-plane setup for that role.
-- Local services: inspect/start/restart bounded system services.
+## Highlights
 
-## What it does
+- **One operational surface** — Hub, Agent, local services, update, uninstall,
+  and diagnostics are available from `relaypilot`.
+- **Agent-initiated onboarding** — the Hub generates a short-lived, single-use
+  invite; the Agent pastes it and receives its long-term credentials over the
+  protected enrollment flow.
+- **Secure control plane** — native HTTPS/mTLS protects transport; every Agent
+  poll is additionally HMAC-SHA256 signed with timestamp and nonce replay
+  checks.
+- **Low-resource defaults** — bounded systemd/OpenRC units, small JSON/HTTP
+  limits, passive Hub view caches, poll batching, and backoff keep NAT boxes
+  responsive.
+- **Human-first Telegram panel** — only `/relaypilot` is registered; status,
+  topology, update center, node detail, and retirement flows stay behind
+  buttons to avoid command clutter.
+- **Safe lifecycle operations** — update defaults to restarting RelayPilot
+  services, data-plane changes hot reload sing-box first, and remote destructive
+  cleanup requires Agent-side opt-in plus confirmation.
 
-Target topology:
+## Architecture
+
+RelayPilot separates the control plane from the data plane:
 
 ```text
+Telegram bot
+  -> Hub
+  -> registered transit / landing Agents
+
 client
   -> transit VLESS Reality inbound
-  -> route.rules auth_user match
+  -> auth_user route rule
   -> Shadowsocks outbound
   -> landing Shadowsocks inbound
   -> direct egress
 ```
 
+The Hub never relays user traffic. It stores registry/task state, issues
+invites, queues work for Agents, aggregates results, and optionally runs the
+Telegram daemon. Transit and landing nodes only poll the Hub and apply local
+sing-box/WireGuard changes.
+
+Supported link modes:
+
+- `direct` (default): transit dials the landing endpoint directly.
+- `mesh`: Hub provisions a dedicated WireGuard /30 between the transit and
+  landing Agents, then binds the transit outbound to the landing overlay IP.
+
 ## Quick start
 
-### Install local CLI
+### 1. Install or update the CLI
 
 ```bash
 bash <(curl -fsSL https://github.com/jiwen77/relaypilot/raw/refs/heads/main/install-relaypilot.sh)
+relaypilot
 ```
 
-In an interactive terminal this installs/updates RelayPilot and opens the
-management menu automatically. Use `relaypilot` or `relaypilot menu` later to
-return to the same panel. Automation remains one-line:
+The installer downloads the Bash entrypoint and the matching static Go core
+binary from GitHub Releases. RelayPilot is Go-only at runtime; Python is not
+installed on target hosts.
+
+Automation remains one-line when an invite is already available:
 
 ```bash
 bash <(curl -fsSL https://github.com/jiwen77/relaypilot/raw/refs/heads/main/install-relaypilot.sh) \
   --enroll 'PASTE_INVITE'
 ```
 
-The installer downloads the Bash entrypoint plus the matching Go core binary.
-Release builds publish only `relaypilot_*` assets. The Go core covers landing/transit writes, agent registration export, Hub task polling,
-HMAC-signed Hub API, Hub Telegram long polling, offline-alert button callbacks,
-Telegram command helpers, task recovery, and token operations. RelayPilot is
-Go-only at runtime; Python is not installed on target hosts.
+### 2. Initialize the Hub
 
-### State migration
-
-RelayPilot stores state in `/etc/relaypilot` by default. To move state between
-hosts or directories:
-
-```bash
-relaypilot migrate-state --from /path/to/old-state --to /etc/relaypilot --dry-run
-relaypilot migrate-state --from /path/to/old-state --to /etc/relaypilot
-```
-
-The migration copies state and preserves file modes; it does not delete the source directory. Use `--force` only if you intentionally want to overwrite conflicts.
-
-Then:
-
-```bash
-relaypilot
-```
-
-### Update
-
-After publishing RelayPilot on GitHub, each machine can update itself from the
-local panel:
+On the Hub machine:
 
 ```text
-RelayPilot -> 本机服务 -> 更新 RelayPilot
+relaypilot
+1) Hub 模式
+  1) 初始化 Hub 服务
+  2) 生成 Agent invite
+```
+
+Command equivalents:
+
+```bash
+relaypilot hub-quick-setup
+relaypilot hub-create-enroll-code \
+  --agent-id transit-hk \
+  --role transit \
+  --ttl 10m \
+  --text
+```
+
+Use `--public-host hub.example` when the Hub should advertise a domain or a
+specific public IP. Creating an invite also creates or updates the Agent as
+`待接入` in the Hub registry. If the invite expires, rerun the same `agent-id`;
+pending role/name/labels are reused when omitted.
+
+### 3. Enroll transit and landing Agents
+
+On each transit or landing node, paste the invite from the Hub:
+
+```text
+relaypilot
+2) Agent 模式
+  3) 粘贴 Hub invite 并安装 Agent 服务
+```
+
+The join wizard reads the invite role and offers the matching local data-plane
+setup before installing the Agent poll service:
+
+```bash
+relaypilot transit-init-reality   # transit node
+relaypilot landing-install-ss     # landing node
+```
+
+If a landing service is reached through a forwarded IP/domain, store the real
+externally reachable address on the Agent:
+
+```bash
+relaypilot public-entry-set --use shadowsocks --name jp \
+  --host front.example --public-port 443 --local-port 2443
+
+# Mesh/WireGuard only when UDP is forwarded too.
+relaypilot public-entry-set --use wireguard --name jp \
+  --host front.example --public-port 51820 --local-port 50123 --network udp
+```
+
+Agent IP mode is only visibility metadata for Hub panels. Keep the default
+`static` mode for stable IP/domain nodes; use `dynamic` when the provider may
+change the public IP:
+
+```bash
+relaypilot agent ip-mode --mode dynamic --public-ip-interval 600
+```
+
+### 4. Link transit → landing
+
+After both Agents are online:
+
+```bash
+relaypilot hub-link transit-hk landing-jp jp
+# or:
+relaypilot hub-link transit-hk landing-jp jp --mode mesh
+```
+
+The Hub asks the landing Agent for its endpoint over the protected control
+plane, then queues a bind task to the transit Agent. No endpoint JSON or secret
+needs to be copied by hand.
+
+### 5. Bind Telegram on the Hub
+
+Only the Hub should receive Telegram updates:
+
+```bash
+relaypilot bot setup
+TG_DRY_RUN=1 relaypilot bot register --hub
+relaypilot bot register --hub
+relaypilot install-bot-service
+```
+
+After binding, send `/relaypilot` to open the panel. The registered command menu
+contains only:
+
+```text
+/relaypilot
+```
+
+RelayPilot ignores generic Telegram commands such as `/start`, `/status`, and
+`/up`, so the same bot/chat can be shared with other services. The panel exposes
+four primary entries: `节点列表`, `拓扑`, `最近操作`, and `更新中心`.
+
+## Update and service refresh
+
+Interactive update path:
+
+```text
+relaypilot
+3) 本机服务
+6) 更新 RelayPilot
 ```
 
 Automation:
 
 ```bash
 relaypilot update
-relaypilot update --version v0.1.7 --restart-services
+relaypilot update --version v0.1.8 --restart-services
 ```
 
-The update replaces the Bash entrypoint and Go core binary. The interactive
-update prompt defaults to restarting installed RelayPilot services so
-Hub/Agent/Bot daemons use the new version immediately. Use
-`--no-restart-services` when you intentionally want running services to keep the
-old process until the next restart.
+The updater replaces the entrypoint and Go core. Interactive update defaults to
+restarting installed RelayPilot services so Hub/Agent/Bot daemons use the new
+version immediately. Use `--no-restart-services` only when you intentionally
+want running services to keep the old process until the next restart.
 
-### Data-plane roles
+Telegram update operations are centralized in `更新中心`: choose Hub or Agent,
+choose the range/node, then confirm.
 
-Agent enrollment connects a node to the Hub control plane. Data-plane setup is the local sing-box config that actually carries traffic. The interactive join flow combines both: paste the invite, RelayPilot reads the invite role, then guides the matching local setup.
+## Security model
 
-Transit role writes/updates a VLESS Reality inbound:
+- Invites are short-lived, single-use installation secrets. Do not paste them in
+  public chat logs, issues, or release notes.
+- Runtime Agent traffic uses HTTPS/mTLS plus HMAC request signatures. Plain HTTP
+  is for localhost, lab, or private-tunnel diagnostics only.
+- Agent tokens are not sent as raw HTTP headers; Hub stores verifier material in
+  Hub-local token state with restrictive file modes.
+- Telegram bot tokens are stored only on the Hub at `/etc/relaypilot` and should
+  not exist on transit/landing Agents.
+- Endpoint passwords are not printed in Telegram replies; task records keep
+  summaries and only protected task payloads carry full endpoint material.
+- Human-facing panels mask public IP display to the first half, for example
+  `203.0.x.x`. Stored state keeps original values for routing and diagnostics.
+- Hub-side GeoIP enrichment is cached and optional. Disable third-party lookups
+  with `RELAYPILOT_GEOIP=0`, or point `RELAYPILOT_GEOIP_URL` at your own
+  lookup service.
+
+## Resource model
+
+RelayPilot is designed for small VPS/NAT hosts:
+
+- `auto` profile chooses service limits by detected RAM.
+- `tiny`: Agent 64M/15% CPU, Hub 96M/25%, Telegram daemon 96M/20%.
+- `small`: Agent 96M/25%, Hub 128M/50%, Telegram daemon 128M/25%.
+- `normal`: Agent 128M/50%, Hub 256M/75%, Telegram daemon 192M/50%.
+
+Use `RELAYPILOT_PROFILE=tiny|small|normal|custom|ask`, or exact overrides such
+as `AGENT_SERVICE_MEMORY_MAX`, `HUB_SERVICE_CPU_QUOTA`, and
+`TG_SERVICE_MEMORY_MAX`.
+
+Hub panel data is cached only in process and only passively: agent/topology
+views expire after 10 seconds, task views after 5 seconds, and file changes
+invalidate the cache immediately. There are no background cache-refresh timers.
+
+## State, migration, and cleanup
+
+RelayPilot stores state in `/etc/relaypilot` by default.
 
 ```bash
-relaypilot transit-init-reality
+relaypilot migrate-state --from /path/to/old-state --to /etc/relaypilot --dry-run
+relaypilot migrate-state --from /path/to/old-state --to /etc/relaypilot
 ```
 
-It generates the Reality private key and short_id when omitted, preserves existing users on updates, runs `sing-box check`, then applies data-plane changes with hot reload first and restart fallback when needed.
-
-Landing role writes a Shadowsocks inbound plus the endpoint secret stored under `/etc/relaypilot/endpoints/<name>.json`:
+Graceful local exit from Hub management keeps the already deployed data plane:
 
 ```bash
-relaypilot landing-install-ss
-
-# optional: expose a direct SOCKS5 landing for clients like sub2api
-relaypilot landing-install-socks
+relaypilot leave-hub
 ```
 
-After both roles are online, link them from the Hub. Hub fetches the landing endpoint over the protected control plane and queues a bind task to the transit, so normal Hub mode no longer requires copying endpoint JSON by hand.
+Remote destructive retirement is intentionally gated. A Hub can request
+`退出 Hub 托管`, `清理托管代理`, or `彻底卸载`, but the Agent must enable
+`allow_remote_decommission=true`, and Hub/TG flows require explicit
+confirmation. Use preview/dry-run first when validating a fleet.
 
-Link modes:
+## Documentation
 
-- `direct` (default): transit dials the landing endpoint server/port directly.
-- `mesh`: Hub provisions a dedicated WireGuard /30 between transit and landing, then binds the Shadowsocks outbound to the landing overlay IP. It does not route default traffic and does not relay data through Hub; `wg-quick` must already be available on both agents.
-
-If a node is behind a fronting datacenter/static IP with port forwarding, set
-the Agent's **public entry**. This is different from IP reporting: IP mode is
-only Hub visibility; public entry is the real externally reachable service
-address that RelayPilot exports to other nodes.
-
-```bash
-# front.example:443 -> landing local :2443
-relaypilot public-entry-set --use shadowsocks --name jp --host front.example --public-port 443 --local-port 2443
-
-# Only needed for mesh when WireGuard UDP is also forwarded.
-relaypilot public-entry-set --use wireguard --name jp --host front.example --public-port 51820 --local-port 50123 --network udp
-```
-
-`landing-install-ss` records the Shadowsocks public entry from its prompts
-automatically. Use Agent mode -> 公网入口 when the forwarded address changes or
-when you need to add the WireGuard entry for mesh.
-
-Manual import remains available for standalone/lab use:
-
-```bash
-relaypilot transit-import-bind
-```
-
-The bind step imports endpoint state, creates/updates the Shadowsocks outbound, adds/updates the VLESS user, prepends `route.rules` with `auth_user -> outbound`, validates sing-box, then hot-reloads sing-box with restart fallback.
-
-If you do not need a transit hop and just want a direct client proxy on the landing host, `relaypilot landing-install-socks` writes a sing-box SOCKS5 inbound plus a reusable SOCKS endpoint JSON under `/etc/relaypilot/endpoints/<name>.json`.
-
-## Hub 模式
-
-Recommended multi-agent model:
-
-```text
-Telegram bot
-  -> one Hub
-  -> registered transit / landing agents
-```
-
-Only the Hub should hold the Telegram bot token and receive Telegram updates.
-Transit/Landing agents talk to the Hub as agents and do not reply to Telegram
-directly, so one command cannot trigger every machine to answer at once.
-
-Agent onboarding is one flow with two sides: the Hub generates a short-lived
-invite with a bound role (`transit` or `landing`), and the Agent pastes that
-invite. Pasting the invite joins the Hub control plane; the same wizard then
-guides the local data-plane setup for that role: transit initializes Reality,
-landing initializes Shadowsocks.
-
-```bash
-# On the Hub host, recommended menu path:
-relaypilot
-# 1) Hub 模式
-#   1) 初始化 Hub 服务
-#   2) 生成 Agent invite
-
-# Equivalent concise commands:
-relaypilot hub-quick-setup
-relaypilot hub-enroll
-
-# Non-interactive/automation path. If --hub-url/--public-host is omitted,
-# RelayPilot detects the Hub public IP.
-relaypilot hub-create-enroll-code \
-  --agent-id transit-hk \
-  --role transit \
-  --ttl 10m
-
-# Add --text for a clean copy-ready install command instead of JSON.
-relaypilot hub-create-enroll-code \
-  --agent-id transit-hk \
-  --role transit \
-  --ttl 10m \
-  --text
-
-# Optional: use a domain or explicit IP instead of auto-detected public IP.
-relaypilot hub-create-enroll-code \
-  --public-host hub.example \
-  --agent-id transit-hk \
-  --role transit \
-  --ttl 10m
-
-# Creating an invite also creates/updates the Agent as "待接入" on the Hub.
-# If the install fails or the invite expires, rerun the same agent id to get a
-# fresh short-lived single-use invite; existing pending role/name/labels are reused.
-
-# On the agent host, paste the invite. The wizard detects the role and
-# offers the matching local setup before installing the poll service:
-relaypilot
-# 2) Agent 模式
-#   3) 粘贴 Hub invite 并安装 Agent 服务
-
-# Non-interactive control-plane enrollment remains available; pair it with
-# transit-init-reality or landing-install-ss for data-plane automation:
-relaypilot agent enroll --invite 'PASTE_INVITE' --install-service
-relaypilot transit-init-reality      # transit host
-relaypilot landing-install-ss        # landing host
-
-# Agent IP mode defaults to static: no extra public-IP probe.
-# If a node's public IP may change, enable low-frequency dynamic reporting:
-relaypilot agent ip-mode --mode dynamic --public-ip-interval 600
-
-# If a fronting static IP/domain forwards to the actual landing box,
-# declare the external service address on that Agent:
-relaypilot public-entry-set --use shadowsocks --name hk --host front.example --public-port 443 --local-port 2443
-relaypilot public-entry-set --use wireguard --name hk --host front.example --public-port 51820 --local-port 50123 --network udp
-
-# After both agents are online, link transit -> landing from the Hub.
-# Hub asks the landing agent for the full endpoint over the signed control plane,
-# then queues a bind task to the transit agent. No endpoint JSON copy is needed.
-relaypilot hub-link transit-hk landing-hk hk
-# Or build a dedicated transit↔landing WireGuard link first:
-relaypilot hub-link transit-hk landing-hk hk --mode mesh
-# or from Telegram/Hub dispatch:
-relaypilot hub-dispatch "/link transit-hk landing-hk hk"
-
-# Hub command examples
-TG_DRY_RUN=1 relaypilot bot register --hub
-relaypilot hub-dispatch "/topology"
-relaypilot hub-dispatch "/status transit-hk"
-relaypilot hub-dispatch "/status all"
-relaypilot hub-results
-```
-
-When commands come from `relaypilot bot daemon`, the Hub records the batch ID,
-waits for all targeted agents to finish, then sends one aggregate Telegram
-result message. CLI users can still inspect results manually with
-`relaypilot hub-results [--batch-id ...]`.
-
-Agent onboarding is agent-initiated: the invite contains Hub URL + a short-lived
-single-use code + the pinned Hub CA, and the agent exchanges it over HTTPS for
-its long-term HMAC token plus mTLS client certificate. Runtime poll traffic is
-then protected in two layers: native HTTPS/mTLS encrypts and authenticates the
-transport, while HMAC-SHA256 signs each request with timestamp + nonce. The
-agent token is not sent in HTTP headers. Plain HTTP is
-for localhost, lab, or private-tunnel diagnostics only; use the native mTLS
-mode above when the Hub API crosses an untrusted network. Firewall the Hub
-control-plane port to known agent IPs when possible.
-For small NAT boxes, the poll loop reuses topology snapshots by default,
-caps each poll batch, limits JSON/HTTP body sizes, and backs off on Hub/network
-errors so it does not spin CPU or grow memory during outages.
-Agent IP reporting is also lightweight: `static` mode sends only normal
-heartbeat metadata, while `dynamic` mode adds a short public-IP HTTPS probe
-every 10 minutes by default, with a fallback endpoint only on failure. Hub
-records the reported/observed IP for visibility; it does not automatically
-rewrite Reality/Shadowsocks/WireGuard configs.
-
-Public entry is the separate reachability setting for forwarded nodes. Example:
-if `front.example:443` forwards to a landing machine's local `:2443`, the
-landing Agent should store a Shadowsocks public entry; Hub linking will export
-`front.example:443` instead of the local address. Mesh mode can also use a
-WireGuard public entry when UDP forwarding exists; if UDP is blocked, keep
-`direct` mode.
-
-To install or inspect bounded services, use the menu path:
-
-```bash
-relaypilot services
-```
-
-Equivalent automation remains available:
-
-```bash
-relaypilot resource-profile
-relaypilot agent install-service \
-  --enrollment-file /etc/relaypilot/agent-enrollment.json
-relaypilot install-hub-service \
-  --host 0.0.0.0 \
-  --port 8443 \
-  --tls-cert /etc/relaypilot/hub-tls/hub.crt \
-  --tls-key /etc/relaypilot/hub-tls/hub.key \
-  --client-ca /etc/relaypilot/hub-tls/ca.crt \
-  --require-client-cert
-```
-
-systemd services use a resource profile selected at install time:
-
-- `auto` (default): choose by detected RAM.
-- `tiny`: agent 64M/15% CPU, Hub 96M/25%, Telegram daemon 96M/20%.
-- `small`: agent 96M/25%, Hub 128M/50%, Telegram daemon 128M/25%.
-- `normal`: agent 128M/50%, Hub 256M/75%, Telegram daemon 192M/50%.
-
-Use `RELAYPILOT_PROFILE` with `tiny|small|normal|custom|ask`, or keep exact overrides:
-`AGENT_SERVICE_MEMORY_MAX`, `AGENT_SERVICE_CPU_QUOTA`,
-`HUB_SERVICE_MEMORY_MAX`, `HUB_SERVICE_CPU_QUOTA`, `TG_SERVICE_MEMORY_MAX`,
-or `TG_SERVICE_CPU_QUOTA`. OpenRC gets restart backoff; hard CPU/RAM caps should
-come from cgroups or the container/VM layer.
-
-Default `/status` is Hub-only; fanout requires an explicit selector such as
-`all`, `transit`, `landing`, `role:transit`, `label:region=hk`, or an `agent_id`.
-Telegram text is human-first: normal replies hide paths/task IDs and show a
-Transit -> Landing tree so failures are easy to locate visually. Technical
-details belong in `/doctor` or `--json` CLI output.
-The tree is built from agent registration snapshots first, then labels as a
-fallback. Liveness icons are based on agent `last_seen`.
-If a node is uninstalled gracefully, remove it from Hub with
-`relaypilot hub-remove-agent <agent_id> --reason uninstalled`; if it
-disappears unexpectedly, Hub will mark it stale/offline by heartbeat timeout
-until you remove it.
-If you only want a node to leave Hub management but keep the already deployed
-Reality/Shadowsocks/sing-box/WireGuard data plane, use the menu item
-`退出 Hub 托管（保留程序/代理）` or run `relaypilot leave-hub`.
-Hub removal also queues safe cleanup on remaining peers: removing a landing
-unbinds matching transit routes/users/outbounds; removing a transit tears down
-matching landing mesh interfaces. The removed machine itself can only be
-cleaned remotely while it is still enrolled and polling; if it is already
-offline, clean its local sing-box/WireGuard files during uninstall.
-If a poll token is exposed or no longer needed, rotate or revoke it from the
-Hub without deleting the agent:
-
-```bash
-relaypilot hub-rotate-token transit-hk
-relaypilot hub-revoke-token transit-hk
-```
-Hub can also send a 24h offline Telegram alert with buttons:
-`relaypilot hub-alert-offline` sends `[删除节点] [继续观察]`.
-Install a low-overhead systemd timer if you want this scan to run
-periodically without keeping another daemon resident:
-
-```bash
-relaypilot install-alert-timer
-```
-
-To let Telegram messages drive Hub commands automatically, install the bounded
-Telegram Hub daemon after `bot setup` and `bot register --hub`:
-
-```bash
-relaypilot install-bot-service
-```
-
-It long-polls Telegram `getUpdates`, runs `hub-dispatch`, sends one Hub reply,
-and inherits service CPU/RAM limits.
-
-Standalone/single-machine Telegram commands are still available for debugging. After Hub binding, use `RelayPilot -> Hub 模式 -> Telegram -> 发送测试` to verify delivery from the menu:
-
-```bash
-relaypilot bot setup
-relaypilot bot commands
-relaypilot bot register
-relaypilot bot dispatch "/status"
-TG_DRY_RUN=1 relaypilot bot send "relaypilot test"
-```
-
-On the Hub bot, send `/start` or `/relaypilot_panel` to open the Telegram
-control panel. The update center shows copyable Telegram code blocks such as
-`/relaypilot_update transit-hk v0.1.7 --restart`; buttons do not trigger
-high-risk update actions directly.
-
-Registered read-only commands:
-
-```text
-/relaypilot_panel
-/relaypilot_help
-/relaypilot_status
-/relaypilot_doctor
-/relaypilot_endpoints
-/relaypilot_show_endpoint <name>
-/relaypilot_inspect_conf [path]
-```
-
-Short commands such as `/status` still work, but the registered Telegram
-menu uses the `relaypilot_` prefix to avoid collisions with other bots/projects.
-
-`bot register` calls Telegram Bot API `setMyCommands`. Use
-`TG_DRY_RUN=1` first if you only want to inspect the API payload.
+- [Quickstart](docs/QUICKSTART.md) — minimal install and first deployment flow.
+- [Hub mode](docs/HUB.md) — enrollment, linking, Telegram, task recovery, and
+  lifecycle operations.
+- [Telegram management](docs/TELEGRAM.md) — Hub panel behavior and command
+  registration.
+- [Protocol contract](docs/PROTOCOL_CONTRACT.md) — endpoint, registration,
+  public-entry, and task-state JSON contracts.
+- [Security policy](SECURITY.md) — supported versions and vulnerability reports.
 
 ## Development
 
 ```bash
 make test
-go test ./...
-scripts/build-release.sh
+make release-check
 ```
 
-If your NAT box or CI image does not ship Go, install a local toolchain for
-development only:
+If the host does not ship Go:
 
 ```bash
 GO_BIN="$(scripts/install-local-go.sh)"
-PATH="$(dirname "$GO_BIN"):$PATH" make test
+PATH="$(dirname "$GO_BIN"):$PATH" make release-check
 ```
 
-Tests are non-invasive: temp directories and a stub `sing-box` are used.
+Release assets are built by `scripts/build-release.sh` and published by the
+GitHub Actions release workflow when a `v*` tag is pushed. Before tagging, run a
+local sensitive-info check and keep runtime state, tokens, certificates, and
+`.omx/` files out of commits.

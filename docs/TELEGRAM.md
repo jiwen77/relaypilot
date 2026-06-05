@@ -9,9 +9,12 @@ Telegram -> Hub -> selected agents -> one aggregated reply
 
 See [HUB.md](HUB.md) for the unified-management flow.
 
-Hub-mode Telegram replies are human-first. `/status` gives a short health
-summary, `/topology` shows the Transit -> Landing display tree, and technical
-details are kept out of normal push text.
+Hub-mode Telegram replies are human-first. RelayPilot only responds to
+`/relaypilot` and `/relaypilot_*` commands in Telegram messages, so generic commands such as
+`/start` or `/status` can remain owned by other services connected to the same
+bot/chat. The panel gives the normal status and operation view; manual
+commands such as `/relaypilot_status` and `/relaypilot_topology` remain
+available for operators.
 
 Hub can also push a 24h offline cleanup prompt with inline buttons:
 
@@ -79,27 +82,26 @@ systemd units use the same `RELAYPILOT_PROFILE` resource profiles documented in
 [HUB.md](HUB.md), Telegram/network errors use retry backoff, and pending result
 batches are bounded.
 
-For Hub mode, the useful runtime commands are:
+For Hub mode, the normal Telegram entry point is:
 
 ```text
-/start
-/relaypilot_panel
-/relaypilot_status
-/relaypilot_topology
-/relaypilot_status all
-/relaypilot_status transit
-/relaypilot_endpoints transit
-/relaypilot_update transit v0.1.7
-/relaypilot_results [batch_id]
+/relaypilot
 ```
 
-`/start` and `/relaypilot_panel` open the Telegram control panel. Its update
-center prints update commands as Telegram code blocks, so they can be tapped or
-long-pressed and copied before sending. The update buttons do not execute an
-OTA operation by themselves.
-
-Short forms like `/status` still work; the registered menu uses `relaypilot_`
-so it is easy to distinguish from other projects.
+`/relaypilot` opens the Telegram control panel. It shows Hub/node/task
+status and exposes four primary buttons: `节点列表`, `拓扑`, `最近操作`, and
+`更新中心`. `刷新节点详情` lives in `节点列表`; `链路检测` lives in `拓扑`. The node
+list is clickable: each node opens a detail page with refresh, doctor,
+related nodes, recent operations, and confirmed retirement actions. Per-node
+updates stay in `更新中心` so update flow remains centralized. When a
+public node IP is available, Hub caches a low-frequency GeoIP lookup and shows
+it as `位置 美国·洛杉矶` or `位置 日本·东京` in the node list. Human-facing panels
+mask IP display to the first half, for example `203.0.x.x`. GeoIP uses the
+configured third-party lookup endpoint and can be disabled with
+`RELAYPILOT_GEOIP=0`. The update center uses a button wizard: choose Hub or
+Agent, choose a range/node, then confirm.
+Unprefixed Telegram
+messages are ignored by RelayPilot to avoid cross-service command conflicts.
 
 Inspect or delete the remote command menu:
 
@@ -108,35 +110,39 @@ relaypilot bot get-commands
 relaypilot bot delete-commands
 ```
 
-Registered commands:
+Registered commands shown in Telegram's command menu stay panel-only:
 
 ```text
-/relaypilot_panel
-/relaypilot_help
-/relaypilot_status
-/relaypilot_doctor
-/relaypilot_endpoints
-/relaypilot_show_endpoint <name>
-/relaypilot_inspect_conf [path]
+/relaypilot
 ```
 
-Hub update commands:
+Advanced commands, including `/relaypilot_panel` and `/relaypilot_status`, remain supported manually and
+through panel buttons where applicable, but are not registered into Telegram's
+global command menu. Manual update shortcuts:
 
 ```text
-/relaypilot_update hub v0.1.7
-/relaypilot_update transit v0.1.7
-/relaypilot_update landing v0.1.7
-/relaypilot_update all v0.1.7
-/relaypilot_update transit-hk v0.1.7 --restart
+/relaypilot_uphub
+/relaypilot_up transit-hk
+/relaypilot_up transit
+/relaypilot_up landing
+/relaypilot_upall
 ```
 
-Use an explicit tag for normal operations. `latest` is accepted, but is best kept
-for lab machines or canary nodes. Node updates are queued through Hub tasks and
+Short update commands default to `latest` and restart the target service. You
+can still pin a version or defer restart:
+
+```text
+/relaypilot_upall v0.1.8
+/relaypilot_upall v0.1.8 --no-restart
+```
+
+Use an explicit tag for normal production operations. `latest` is convenient for
+lab machines or canary nodes. Node updates are queued through Hub tasks and
 reported back as an aggregate result.
 
 ## Test locally
 
 ```bash
-relaypilot bot dispatch "/status"
+relaypilot bot dispatch "/relaypilot_status"
 TG_DRY_RUN=1 relaypilot bot send "test"
 ```

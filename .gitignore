@@ -2,6 +2,9 @@
 *-summary-*.json
 *-mihomo-*.yaml
 
+# release/build artifacts
+dist/
+
 # Python/test cache
 __pycache__/
 *.py[cod]
@@ -9,6 +12,17 @@ __pycache__/
 # local runtime state
 .state/
 .tmp/
+.omx/
+
+# local secrets and generated credentials
+.env
+.env.*
+*.pem
+*.key
+*.crt
+*.csr
+*.p12
+*.pfx
 
 # editor/system
 .DS_Store

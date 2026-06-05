@@ -58,7 +58,7 @@ Or run automation:
 
 ```bash
 relaypilot update
-relaypilot update --version v0.1.7 --restart-services
+relaypilot update --version v0.1.8 --restart-services
 ```
 
 This updates the entrypoint and Go core. The interactive updater defaults to
@@ -236,7 +236,10 @@ host/ports for exported Shadowsocks endpoints and WireGuard mesh peer endpoints.
 
 In Hub mode `/relaypilot_status` is Hub-only. Use `/relaypilot_status all` or
 `/relaypilot_status transit-hk` when you explicitly want to target agents.
-Short aliases such as `/status all` still work.
+Generic Telegram commands such as `/start` and `/status` are ignored to avoid
+conflicts with other services connected to the same bot/chat. CLI
+`hub-dispatch` still accepts short internal forms such as `/status all` for
+automation.
 
 Use `/relaypilot_topology` to see the human-facing Transit -> Landing tree.
 
