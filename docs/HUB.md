@@ -511,7 +511,7 @@ relaypilot hub-dispatch "/topology"
 relaypilot hub-dispatch "/status all"
 relaypilot hub-dispatch "/endpoints transit"
 relaypilot hub-dispatch "/show_endpoint landing-hk hk"
-relaypilot hub-dispatch "/update transit v0.1.6"
+relaypilot hub-dispatch "/update transit v0.1.7"
 relaypilot hub-tasks
 relaypilot hub-recover-tasks
 relaypilot hub-results

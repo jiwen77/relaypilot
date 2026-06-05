@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.7
+
+- Default the interactive self-update prompt to restarting installed RelayPilot services so Hub/Agent/Bot daemons use the refreshed version immediately.
+- Document `--no-restart-services` as the explicit opt-out for deferred service restarts.
+
 ## 0.1.6
 
 - Refine the Hub/Agent interactive flow so menus are state-aware and advanced/destructive operations stay out of the primary path.

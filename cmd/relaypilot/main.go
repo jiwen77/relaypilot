@@ -7594,7 +7594,7 @@ func defaultUpdateExampleVersion() string {
 	if strings.HasPrefix(buildVersion, "v") {
 		return buildVersion
 	}
-	return "v0.1.6"
+	return "v0.1.7"
 }
 
 func updateCenterReply() telegramReply {

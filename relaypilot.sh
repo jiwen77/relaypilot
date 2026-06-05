@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="${RELAYPILOT_VERSION:-0.1.6}"
+VERSION="${RELAYPILOT_VERSION:-0.1.7}"
 REPO="${REPO:-jiwen77/relaypilot}"
 RAW_REF="${RAW_REF:-main}"
 RAW_BASE="${RAW_BASE:-https://github.com/${REPO}/raw/${RAW_REF}}"
@@ -237,7 +237,7 @@ Usage:
   bash relaypilot.sh bot register
   bash relaypilot.sh install
   bash relaypilot.sh update
-  bash relaypilot.sh update --version v0.1.6 --restart-services
+  bash relaypilot.sh update --version v0.1.7 --restart-services
   bash relaypilot.sh leave-hub  # remove Agent service/Hub credentials, keep Reality/SS/sing-box
   bash relaypilot.sh uninstall --dry-run
   bash relaypilot.sh uninstall --yes
@@ -1031,7 +1031,7 @@ self_update() {
   "$INSTALL_DIR/bin/relaypilot" version || true
 
   if [[ "$restart_services" == "ask" ]]; then
-    if confirm "是否重启已安装的 RelayPilot 服务以应用新版本" n; then
+    if confirm "是否重启已安装的 RelayPilot 服务以应用新版本" y; then
       restart_services=yes
     else
       restart_services=no

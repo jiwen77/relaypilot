@@ -493,6 +493,25 @@ INSTALL_DIR="$ROOT/update-dir" \
 BIN_PATH="$ROOT/bin/relaypilot-updated" \
 RELAYPILOT_NO_ROOT=1 \
 bash ./relaypilot.sh update --version v-local --no-restart-services > "$ROOT/update.out" 2> "$ROOT/update.err"
+mkdir -p "$ROOT/fake-update-bin"
+cat > "$ROOT/fake-update-bin/systemctl" <<'EOF_SYSTEMCTL'
+#!/usr/bin/env bash
+printf 'systemctl %s\n' "$*" >> "${RELAYPILOT_FAKE_SYSTEMCTL_LOG:?}"
+exit 0
+EOF_SYSTEMCTL
+chmod +x "$ROOT/fake-update-bin/systemctl"
+printf '\n' | RAW_BASE="file://$ROOT/raw" \
+RELEASE_BASE="file://$ROOT/release" \
+INSTALL_DIR="$ROOT/update-default-restart-dir" \
+BIN_PATH="$ROOT/bin/relaypilot-updated-default-restart" \
+RELAYPILOT_NO_ROOT=1 \
+RELAYPILOT_FAKE_SYSTEMCTL_LOG="$ROOT/update-default-restart-systemctl.log" \
+PATH="$ROOT/fake-update-bin:$PATH" \
+bash ./relaypilot.sh update --version v-local > "$ROOT/update-default-restart.out" 2> "$ROOT/update-default-restart.err"
+grep -q '是否重启已安装的 RelayPilot 服务以应用新版本 \[Y/n\]' "$ROOT/update-default-restart.out"
+grep -q 'systemctl restart relaypilot-agent' "$ROOT/update-default-restart-systemctl.log"
+grep -q 'systemctl restart relaypilot-hub' "$ROOT/update-default-restart-systemctl.log"
+grep -q 'systemctl restart relaypilot-bot' "$ROOT/update-default-restart-systemctl.log"
 RAW_BASE="file://$ROOT/raw" \
 RELEASE_BASE="file://$ROOT/release" \
 VERSION="v-local" \

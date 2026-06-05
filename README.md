@@ -89,12 +89,14 @@ Automation:
 
 ```bash
 relaypilot update
-relaypilot update --version v0.1.6 --restart-services
+relaypilot update --version v0.1.7 --restart-services
 ```
 
-The update replaces the Bash entrypoint and Go core binary. Running services keep
-using the old process until restarted; choose `--restart-services` or restart
-Hub/Agent/Bot services from the same panel to apply it immediately.
+The update replaces the Bash entrypoint and Go core binary. The interactive
+update prompt defaults to restarting installed RelayPilot services so
+Hub/Agent/Bot daemons use the new version immediately. Use
+`--no-restart-services` when you intentionally want running services to keep the
+old process until the next restart.
 
 ### Data-plane roles
 
@@ -366,7 +368,7 @@ TG_DRY_RUN=1 relaypilot bot send "relaypilot test"
 
 On the Hub bot, send `/start` or `/relaypilot_panel` to open the Telegram
 control panel. The update center shows copyable Telegram code blocks such as
-`/relaypilot_update transit-hk v0.1.6 --restart`; buttons do not trigger
+`/relaypilot_update transit-hk v0.1.7 --restart`; buttons do not trigger
 high-risk update actions directly.
 
 Registered read-only commands:
