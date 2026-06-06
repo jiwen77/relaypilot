@@ -30,11 +30,39 @@ func writeExecutable(t *testing.T, path, content string) {
 
 func TestSelfUpdateResultTextReportsAlreadyCurrent(t *testing.T) {
 	text := selfUpdateResultText("latest", "==> 已是最新版本：v0.1.10\n==> 如需重新安装当前版本，请添加 --force。\n")
-	if !strings.Contains(text, "RelayPilot already at latest") {
+	if !strings.Contains(text, "RelayPilot 已是最新版本") || !strings.Contains(text, "当前版本：v0.1.10") || !strings.Contains(text, "无需更新") {
 		t.Fatalf("skip text should not claim update: %s", text)
 	}
-	if strings.Contains(text, "RelayPilot updated to") {
-		t.Fatalf("skip text should not use updated wording: %s", text)
+	for _, bad := range []string{"RelayPilot 已更新", "RelayPilot updated to", "==>", "--force"} {
+		if strings.Contains(text, bad) {
+			t.Fatalf("skip text should be clean already-current wording, contains %q in: %s", bad, text)
+		}
+	}
+}
+
+func TestHubUpdateResultTextReportsAlreadyCurrentCleanly(t *testing.T) {
+	root := t.TempDir()
+	state := filepath.Join(root, "hub")
+	if err := saveHubRegistry(state, defaultHubRegistry()); err != nil {
+		t.Fatal(err)
+	}
+	cli := filepath.Join(root, "relaypilot")
+	writeExecutable(t, cli, "#!/usr/bin/env sh\nprintf '==> 已是最新版本：v0.1.13\\n==> 如需重新安装当前版本，请添加 --force。\\n'\n")
+	t.Setenv("RELAYPILOT_CLI", cli)
+
+	text, err := hubUpdateCommandWithDefaults(state, nil, []string{"hub", "latest", "--restart"}, "/relaypilot_uphub", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{"Hub 已更新", "版本：latest", "==>", "--force", "12 秒后重启"} {
+		if strings.Contains(text, bad) {
+			t.Fatalf("already-current update text should be user-facing, not raw/successful update wording; contains %q in:\n%s", bad, text)
+		}
+	}
+	for _, want := range []string{"✅ Hub 已是最新版本", "当前版本：v0.1.13", "无需更新", "未安排重启"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("already-current update text missing %q:\n%s", want, text)
+		}
 	}
 }
 
@@ -953,6 +981,196 @@ func TestTelegramProbeHelpListsDetectedLinksWithoutProbing(t *testing.T) {
 	}
 	if !strings.Contains(reply.Text, "仅生成命令，不会立即探测") {
 		t.Fatalf("probe help should make resource behavior explicit: %#v", reply)
+	}
+}
+
+func TestTelegramCallbackReplyEditsSourceMessage(t *testing.T) {
+	var gotPath string
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		data, _ := io.ReadAll(r.Body)
+		gotBody = string(data)
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":42}}`))
+	}))
+	defer srv.Close()
+
+	cfg := obj{"api_base": srv.URL, "bot_token": "token", "chat_id": "123", "enabled": true}
+	update := obj{"callback_query": obj{"message": obj{"message_id": 42, "chat": obj{"id": "123"}}}}
+	reply := telegramReply{
+		Text:        "控制卡片",
+		ParseMode:   "HTML",
+		ReplyMarkup: tgKeyboard([]any{tgButton("返回", "rp:panel")}),
+	}
+
+	if err := sendTelegramReplyForUpdate(cfg, update, reply, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if gotPath != "/bottoken/editMessageText" {
+		t.Fatalf("callback replies should edit the source card, path=%s body=%s", gotPath, gotBody)
+	}
+	form, err := url.ParseQuery(gotBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if form.Get("chat_id") != "123" || form.Get("message_id") != "42" || form.Get("text") != "控制卡片" || form.Get("parse_mode") != "HTML" {
+		t.Fatalf("edit payload = %s", gotBody)
+	}
+	if !strings.Contains(form.Get("reply_markup"), "rp:panel") {
+		t.Fatalf("edit payload missing inline keyboard: %s", gotBody)
+	}
+}
+
+func TestTelegramCallbackPendingBatchKeepsMessageTarget(t *testing.T) {
+	root := t.TempDir()
+	state := filepath.Join(root, "hub")
+	reg := defaultHubRegistry()
+	reg["agents"] = obj{"transit-hk": obj{
+		"kind":      agentRegistrationKind,
+		"version":   version,
+		"id":        "transit-hk",
+		"role":      "transit",
+		"name":      "HK Transit",
+		"transport": "poll",
+		"last_seen": now(),
+	}}
+	if err := saveHubRegistry(state, reg); err != nil {
+		t.Fatal(err)
+	}
+
+	reply := handleTelegramHubReply(state, obj{"update_id": 30, "callback_query": obj{
+		"data": "rp:upd:run:transit-hk",
+		"message": obj{
+			"message_id": 77,
+			"chat":       obj{"id": "999"},
+		},
+	}})
+	batchID := extractBatchID(reply.Text)
+	if batchID == "" {
+		t.Fatalf("update callback should queue a tracked batch: %#v", reply)
+	}
+	pending, err := loadPendingTGBatches(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch := asObj(asObj(pending["batches"])[batchID])
+	if batch["chat_id"] != "999" || int64Value(batch["message_id"]) != 77 {
+		t.Fatalf("callback batch should keep edit target: %#v", batch)
+	}
+}
+
+func TestTelegramNavigationCallbacksAreSilent(t *testing.T) {
+	root := t.TempDir()
+	state := filepath.Join(root, "hub")
+	reg := defaultHubRegistry()
+	reg["agents"] = obj{"transit-hk": obj{
+		"kind":      agentRegistrationKind,
+		"version":   version,
+		"id":        "transit-hk",
+		"role":      "transit",
+		"name":      "HK Transit",
+		"transport": "poll",
+		"last_seen": now(),
+	}}
+	if err := saveHubRegistry(state, reg); err != nil {
+		t.Fatal(err)
+	}
+
+	reply := handleTelegramHubReply(state, obj{"update_id": 31, "callback_query": obj{
+		"data":    "rp:agents",
+		"message": obj{"message_id": 42, "chat": obj{"id": "999"}},
+	}})
+	if reply.CallbackText != "" {
+		t.Fatalf("navigation callbacks should not show toast text: %#v", reply)
+	}
+	if len(reply.ReplyMarkup) == 0 {
+		t.Fatalf("navigation callback should still return inline keyboard: %#v", reply)
+	}
+
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, _ := io.ReadAll(r.Body)
+		gotBody = string(data)
+		_, _ = w.Write([]byte(`{"ok":true,"result":true}`))
+	}))
+	defer srv.Close()
+
+	cfg := obj{"api_base": srv.URL, "bot_token": "token", "chat_id": "123", "enabled": true}
+	if err := answerTelegramCallback(cfg, "callback-id", "", time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(gotBody, "text=") {
+		t.Fatalf("silent callback acknowledgement should omit visible text: %s", gotBody)
+	}
+	if !strings.Contains(gotBody, "callback_query_id=callback-id") {
+		t.Fatalf("callback acknowledgement missing id: %s", gotBody)
+	}
+}
+
+func TestTelegramRestartNoticeSendsOnceAndClears(t *testing.T) {
+	root := t.TempDir()
+	state := filepath.Join(root, "hub")
+	oldBuildVersion := buildVersion
+	buildVersion = "v-test"
+	t.Cleanup(func() { buildVersion = oldBuildVersion })
+	if err := recordPendingTGRestartNotice(state, "latest", 5); err != nil {
+		t.Fatal(err)
+	}
+
+	var requests int
+	var gotPath string
+	var gotText string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		gotPath = r.URL.Path
+		data, _ := io.ReadAll(r.Body)
+		form, _ := url.ParseQuery(string(data))
+		gotText = form.Get("text")
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":99}}`))
+	}))
+	defer srv.Close()
+
+	cfg := obj{"api_base": srv.URL, "bot_token": "token", "chat_id": "123", "enabled": true}
+	done, err := sendPendingTGRestartNotice(state, cfg, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !done || requests != 1 || gotPath != "/bottoken/sendMessage" {
+		t.Fatalf("notice send = done %v requests %d path %s", done, requests, gotPath)
+	}
+	for _, want := range []string{"✅ Hub/Bot 已重启完成", "当前版本：v-test", "更新目标：latest", "安排时间："} {
+		if !strings.Contains(gotText, want) {
+			t.Fatalf("restart notice missing %q:\n%s", want, gotText)
+		}
+	}
+	if _, err := os.Stat(telegramRestartNoticePath(state)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("notice should be removed after successful send: %v", err)
+	}
+
+	done, err = sendPendingTGRestartNotice(state, cfg, time.Second)
+	if err != nil || !done || requests != 1 {
+		t.Fatalf("second notice send should be no-op: done=%v err=%v requests=%d", done, err, requests)
+	}
+}
+
+func TestTelegramRestartNoticeSendFailureKeepsNotice(t *testing.T) {
+	root := t.TempDir()
+	state := filepath.Join(root, "hub")
+	if err := recordPendingTGRestartNotice(state, "latest", 5); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"ok":false,"description":"temporary failure"}`, http.StatusBadGateway)
+	}))
+	defer srv.Close()
+
+	cfg := obj{"api_base": srv.URL, "bot_token": "token", "chat_id": "123", "enabled": true}
+	done, err := sendPendingTGRestartNotice(state, cfg, time.Second)
+	if err == nil || done {
+		t.Fatalf("failed send should return not done with error: done=%v err=%v", done, err)
+	}
+	if _, err := os.Stat(telegramRestartNoticePath(state)); err != nil {
+		t.Fatalf("notice should remain after failed send: %v", err)
 	}
 }
 
@@ -2307,6 +2525,11 @@ func TestTelegramHubUpdateDispatchAndAPIEncoding(t *testing.T) {
 	if !strings.Contains(agentsReply.Text, "节点列表") || !bytes.Contains(agentsMarkup, []byte("刷新节点详情")) || !bytes.Contains(agentsMarkup, []byte("rp:sync_all")) || !bytes.Contains(agentsMarkup, []byte("rp:agent:transit-hk")) {
 		t.Fatalf("agents page should expose node detail refresh: %#v markup=%s", agentsReply, agentsMarkup)
 	}
+	agentsCommandReply := handleTelegramHubReply(state, obj{"update_id": 29, "message": obj{"text": "/relaypilot_agents", "chat": obj{"id": "999"}}})
+	agentsCommandMarkup, _ := json.Marshal(agentsCommandReply.ReplyMarkup)
+	if !strings.Contains(agentsCommandReply.Text, "节点列表") || !bytes.Contains(agentsCommandMarkup, []byte("rp:agent:transit-hk")) || !bytes.Contains(agentsCommandMarkup, []byte("rp:sync_all")) {
+		t.Fatalf("agents command should open the same button page: %#v markup=%s", agentsCommandReply, agentsCommandMarkup)
+	}
 	nodeDetail := handleTelegramHubReply(state, obj{"update_id": 18, "callback_query": obj{"data": "rp:agent:transit-hk", "message": obj{"chat": obj{"id": "999"}}}})
 	nodeDetailMarkup, _ := json.Marshal(nodeDetail.ReplyMarkup)
 	for _, want := range []string{"ID：", "transit-hk", "角色：中转", "状态：在线", "网络：动态", "IP 8.8.*.*", "位置 中国香港", "详情：上次刷新"} {
@@ -2383,7 +2606,7 @@ func TestTelegramHubUpdateDispatchAndAPIEncoding(t *testing.T) {
 	}
 	updateReply := handleTelegramHubReply(state, obj{"update_id": 5, "callback_query": obj{"data": "rp:update", "message": obj{"chat": obj{"id": "999"}}}})
 	updateMarkup, _ := json.Marshal(updateReply.ReplyMarkup)
-	if strings.Contains(updateReply.Text, "/relaypilot_up") || strings.Contains(updateReply.Text, "/relaypilot_update") || !strings.Contains(updateReply.Text, "默认：latest + 重启") || !bytes.Contains(updateMarkup, []byte("rp:upd:agent")) {
+	if strings.Contains(updateReply.Text, "/relaypilot_up") || strings.Contains(updateReply.Text, "/relaypilot_update") || !strings.Contains(updateReply.Text, "默认：latest + 检查后重启") || !bytes.Contains(updateMarkup, []byte("rp:upd:agent")) {
 		t.Fatalf("update center should stay button-first without command clutter: %#v", updateReply)
 	}
 	agentUpdateMenu := handleTelegramHubReply(state, obj{"update_id": 9, "callback_query": obj{"data": "rp:upd:agent", "message": obj{"chat": obj{"id": "999"}}}})
@@ -2393,11 +2616,11 @@ func TestTelegramHubUpdateDispatchAndAPIEncoding(t *testing.T) {
 	}
 	confirmUpdate := handleTelegramHubReply(state, obj{"update_id": 10, "callback_query": obj{"data": "rp:upd:agent:transit-hk", "message": obj{"chat": obj{"id": "999"}}}})
 	confirmMarkup, _ := json.Marshal(confirmUpdate.ReplyMarkup)
-	if !strings.Contains(confirmUpdate.Text, "确认更新") || !strings.Contains(confirmUpdate.Text, "目标：Agent：transit-hk") || strings.Contains(confirmUpdate.Text, "/relaypilot_up") || !bytes.Contains(confirmMarkup, []byte("rp:upd:run:transit-hk")) {
+	if !strings.Contains(confirmUpdate.Text, "检查并更新") || !strings.Contains(confirmUpdate.Text, "目标：Agent：transit-hk") || !strings.Contains(confirmUpdate.Text, "目标版本：latest") || !strings.Contains(confirmUpdate.Text, "先检查目标版本") || strings.Contains(confirmUpdate.Text, "/relaypilot_up") || !bytes.Contains(confirmMarkup, []byte("rp:upd:run:transit-hk")) || !bytes.Contains(confirmMarkup, []byte("检查并更新/重启")) {
 		t.Fatalf("confirm update should show target and remain button-first: %#v markup=%s", confirmUpdate, confirmMarkup)
 	}
 	hubConfirm := handleTelegramHubReply(state, obj{"update_id": 13, "callback_query": obj{"data": "rp:upd:hub", "message": obj{"chat": obj{"id": "999"}}}})
-	if !strings.Contains(hubConfirm.Text, "目标：Hub") || strings.Contains(hubConfirm.Text, "Agent 轮询领取") {
+	if !strings.Contains(hubConfirm.Text, "目标：Hub") || !strings.Contains(hubConfirm.Text, "先检查当前/最新版本") || strings.Contains(hubConfirm.Text, "Agent 轮询领取") {
 		t.Fatalf("hub confirm should show hub-specific target/effect: %#v", hubConfirm)
 	}
 	emptyState := filepath.Join(root, "empty-hub")

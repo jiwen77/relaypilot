@@ -561,25 +561,33 @@ func executeSelfUpdateTask(task obj) obj {
 	text := selfUpdateResultText(updateVersion, out)
 	if truthy(payload["restart_services"]) {
 		serviceName := firstNonEmpty(str(payload["service_name"]), envOrDefault("RELAYPILOT_AGENT_SERVICE_NAME", "relaypilot-agent"))
-		if err := scheduleServiceRestart([]string{serviceName}, 12); err != nil {
-			text += "\nrestart schedule failed: " + err.Error()
+		if relayPilotUpdateAlreadyCurrent(out) {
+			text += "\n无需更新，未安排重启。"
+		} else if err := scheduleServiceRestart([]string{serviceName}, agentServiceRestartDelaySecs); err != nil {
+			text += "\nAgent 服务重启计划失败：" + err.Error()
 		} else {
-			text += "\nagent service restart scheduled in ~12s"
+			text += fmt.Sprintf("\n已安排约 %d 秒后尝试重启 Agent 服务。", agentServiceRestartDelaySecs)
 		}
 	}
 	return obj{"success": true, "command": "self_update", "version": updateVersion, "restart_services": truthy(payload["restart_services"]), "text": text}
 }
 
 func selfUpdateResultText(updateVersion, output string) string {
-	verb := "updated to"
-	if strings.Contains(output, "已是最新版本") {
-		verb = "already at"
+	resolvedVersion := relayPilotVersionFromUpdateOutput(updateVersion, output)
+	if relayPilotUpdateAlreadyCurrent(output) {
+		return strings.Join([]string{
+			"RelayPilot 已是最新版本",
+			"当前版本：" + resolvedVersion,
+			"无需更新。",
+		}, "\n")
 	}
-	text := "RelayPilot " + verb + " " + updateVersion
-	if trimmed := lastNonEmptyLines(output, 4); trimmed != "" {
-		text += "\n" + trimmed
+	lines := []string{"RelayPilot 已更新"}
+	if resolvedVersion != "" && resolvedVersion != updateVersion {
+		lines = append(lines, "当前版本："+resolvedVersion)
+	} else {
+		lines = append(lines, "版本："+updateVersion)
 	}
-	return text
+	return strings.Join(lines, "\n")
 }
 
 func readAgentToken(token, tokenFile string) (string, error) {

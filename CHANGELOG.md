@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.1.14 - 2026-06-06
+
+- Keep the Telegram Hub panel in one editable card for button navigation, with text-command aliases opening the same button pages.
+- Silence routine Telegram callback popups while preserving inline keyboards and important status messages.
+- Clean up Hub and Agent update result wording so already-current checks do not claim updates or show raw installer logs.
+- Shorten Hub/Bot post-update restart delay to five seconds and send a one-time Telegram notification after the Bot comes back online.
+
 ## 0.1.13 - 2026-06-06
 
 - Mask every Telegram-bound IPv4 to the first two octets with `*.*`, including message text, inline button labels, URL fields, dry-run payloads, and standalone Hub bot sends.

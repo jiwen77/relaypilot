@@ -2224,23 +2224,31 @@ func hubUpdateCommandWithDefaults(stateDir string, agents []obj, args []string, 
 		if err != nil {
 			return "", err
 		}
-		lines := []string{
-			"✅ Hub 已更新 RelayPilot",
-			"版本：" + updateVersion,
-		}
-		if trimmed := lastNonEmptyLines(out, 4); trimmed != "" {
-			lines = append(lines, trimmed)
-		}
-		if restart {
-			if err := scheduleServiceRestart([]string{envOrDefault("RELAYPILOT_HUB_SERVICE_NAME", "relaypilot-hub"), envOrDefault("RELAYPILOT_BOT_SERVICE_NAME", "relaypilot-bot")}, 12); err != nil {
+		alreadyCurrent := relayPilotUpdateAlreadyCurrent(out)
+		lines := hubUpdateResultLines(updateVersion, out, alreadyCurrent)
+		if restart && !alreadyCurrent {
+			noticeRecorded := false
+			if err := recordPendingTGRestartNotice(stateDir, updateVersion, hubServiceRestartDelaySeconds); err != nil {
+				lines = append(lines, "⚠️ 重启完成通知记录失败："+err.Error())
+			} else {
+				noticeRecorded = true
+			}
+			if err := scheduleServiceRestart([]string{envOrDefault("RELAYPILOT_HUB_SERVICE_NAME", "relaypilot-hub"), envOrDefault("RELAYPILOT_BOT_SERVICE_NAME", "relaypilot-bot")}, hubServiceRestartDelaySeconds); err != nil {
+				if noticeRecorded {
+					_ = clearPendingTGRestartNotice(stateDir)
+				}
 				lines = append(lines, "⚠️ 重启计划失败："+err.Error())
 			} else {
-				lines = append(lines, "将在约 12 秒后重启 Hub/Bot 服务。")
+				lines = append(lines, fmt.Sprintf("已安排约 %d 秒后尝试重启 Hub/Bot 服务。", hubServiceRestartDelaySeconds))
+				if noticeRecorded {
+					lines = append(lines, "重启完成后会发送 Telegram 通知。")
+				}
 			}
-		} else {
+		} else if restart && alreadyCurrent {
+			lines = append(lines, "无需更新，未安排重启。")
+		} else if !alreadyCurrent {
 			lines = append(lines, "常驻 Hub/Bot 服务需重启后才使用新版本。")
 		}
-		lines = append(lines, "Telegram 命令菜单如仍显示旧项：relaypilot bot register --hub")
 		return strings.Join(lines, "\n"), nil
 	}
 	matched := selectAgents(agents, selector)
@@ -2270,6 +2278,59 @@ func hubUpdateCommandWithDefaults(stateDir string, agents []obj, args []string, 
 		fmt.Fprintf(&b, "%s %s · %s\n", roleIcon(str(agent["role"])), str(agent["id"]), str(agent["name"]))
 	}
 	return strings.TrimRight(b.String(), "\n"), nil
+}
+
+func relayPilotUpdateAlreadyCurrent(output string) bool {
+	lower := strings.ToLower(output)
+	return strings.Contains(output, "已是最新版本") ||
+		strings.Contains(lower, "already at latest") ||
+		strings.Contains(lower, "already latest") ||
+		strings.Contains(lower, "already up to date")
+}
+
+func relayPilotVersionFromUpdateOutput(updateVersion, output string) string {
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "==>"))
+		line = strings.TrimSpace(line)
+		if strings.Contains(line, "已是最新版本") {
+			if _, rest, ok := strings.Cut(line, "："); ok {
+				if version := strings.TrimSpace(rest); version != "" {
+					return version
+				}
+			}
+			if _, rest, ok := strings.Cut(line, ":"); ok {
+				if version := strings.TrimSpace(rest); version != "" {
+					return version
+				}
+			}
+		}
+		if strings.HasPrefix(line, "RelayPilot Go core ") {
+			if version := strings.TrimSpace(strings.TrimPrefix(line, "RelayPilot Go core ")); version != "" {
+				return version
+			}
+		}
+	}
+	return updateVersion
+}
+
+func hubUpdateResultLines(updateVersion, output string, alreadyCurrent bool) []string {
+	resolvedVersion := relayPilotVersionFromUpdateOutput(updateVersion, output)
+	if alreadyCurrent {
+		return []string{
+			"✅ Hub 已是最新版本",
+			"当前版本：" + resolvedVersion,
+			"无需更新。",
+		}
+	}
+	lines := []string{
+		"✅ Hub 已更新 RelayPilot",
+	}
+	if resolvedVersion != "" && resolvedVersion != updateVersion {
+		lines = append(lines, "当前版本："+resolvedVersion)
+	} else {
+		lines = append(lines, "版本："+updateVersion)
+	}
+	return lines
 }
 
 func compactUpdateArgs(command string, args []string) ([]string, bool) {

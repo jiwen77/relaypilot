@@ -58,6 +58,8 @@ const (
 	maxConfigFiles                 = 64
 	maxPendingTGBatches            = 32
 	tgBatchResultTimeoutSec        = 120
+	hubServiceRestartDelaySeconds  = 5
+	agentServiceRestartDelaySecs   = 12
 	defaultTaskLeaseTimeoutSeconds = 120
 	defaultTaskMaxLeaseCount       = 3
 	defaultMeshConfigDir           = "/etc/wireguard"

@@ -874,6 +874,10 @@ func savePendingTGBatches(stateDir string, data obj) error {
 }
 
 func recordPendingTGBatch(stateDir, batchID, originText string, chatID any) error {
+	return recordPendingTGBatchTarget(stateDir, batchID, originText, chatID, nil)
+}
+
+func recordPendingTGBatchTarget(stateDir, batchID, originText string, chatID, messageID any) error {
 	if batchID == "" {
 		return nil
 	}
@@ -897,15 +901,32 @@ func recordPendingTGBatch(stateDir, batchID, originText string, chatID any) erro
 			candidates = candidates[1:]
 		}
 	}
-	batches[batchID] = obj{
+	batch := obj{
 		"batch_id":        batchID,
 		"origin_text":     originText,
 		"chat_id":         chatID,
 		"created_at":      now(),
 		"timeout_seconds": tgBatchResultTimeoutSec,
 	}
+	if int64Value(messageID) > 0 {
+		batch["message_id"] = int64Value(messageID)
+	}
+	batches[batchID] = batch
 	data["batches"] = batches
 	return savePendingTGBatches(stateDir, data)
+}
+
+func pendingTGBatchResult(batch obj, batchID, text string) obj {
+	out := obj{
+		"batch_id":    batchID,
+		"chat_id":     batch["chat_id"],
+		"origin_text": batch["origin_text"],
+		"text":        text,
+	}
+	if int64Value(batch["message_id"]) > 0 {
+		out["message_id"] = int64Value(batch["message_id"])
+	}
+	return out
 }
 
 func collectReadyPendingTGBatches(stateDir string) ([]obj, error) {
@@ -925,35 +946,20 @@ func collectReadyPendingTGBatches(stateDir string) ([]obj, error) {
 		matched := batchTasks(tasks, batchID)
 		if len(matched) == 0 {
 			if pendingBatchExpired(batch) {
-				ready = append(ready, obj{
-					"batch_id":    batchID,
-					"chat_id":     batch["chat_id"],
-					"origin_text": batch["origin_text"],
-					"text":        fmt.Sprintf("⏱️ 最近操作超时：%s\n没有找到该批次任务。", batchID),
-				})
+				ready = append(ready, pendingTGBatchResult(batch, batchID, fmt.Sprintf("⏱️ 最近操作超时：%s\n没有找到该批次任务。", batchID)))
 				delete(batches, batchID)
 				changed = true
 			}
 			continue
 		}
 		if batchReady(matched) {
-			ready = append(ready, obj{
-				"batch_id":    batchID,
-				"chat_id":     batch["chat_id"],
-				"origin_text": batch["origin_text"],
-				"text":        formatHubTaskResultsText(tasks, batchID),
-			})
+			ready = append(ready, pendingTGBatchResult(batch, batchID, formatHubTaskResultsText(tasks, batchID)))
 			delete(batches, batchID)
 			changed = true
 			continue
 		}
 		if pendingBatchExpired(batch) {
-			ready = append(ready, obj{
-				"batch_id":    batchID,
-				"chat_id":     batch["chat_id"],
-				"origin_text": batch["origin_text"],
-				"text":        "⏱️ 部分任务仍未完成，当前最近操作：\n" + formatHubTaskResultsText(tasks, batchID),
-			})
+			ready = append(ready, pendingTGBatchResult(batch, batchID, "⏱️ 部分任务仍未完成，当前最近操作：\n"+formatHubTaskResultsText(tasks, batchID)))
 			delete(batches, batchID)
 			changed = true
 		}

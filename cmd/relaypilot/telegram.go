@@ -22,6 +22,9 @@ func telegramConfigPath(stateDir string) string { return filepath.Join(stateDir,
 func telegramCallbackMapPath(stateDir string) string {
 	return filepath.Join(stateDir, "telegram-callback-map.json")
 }
+func telegramRestartNoticePath(stateDir string) string {
+	return filepath.Join(stateDir, "telegram-restart-notice.json")
+}
 
 var telegramIPv4RE = regexp.MustCompile(`(^|[^0-9])([0-9]{1,3}\.[0-9]{1,3})\.[0-9]{1,3}\.[0-9]{1,3}([^0-9]|$)`)
 var telegramBareIPv4RE = regexp.MustCompile(`(?m)(^|[^0-9])(?:[0-9]{1,3}\.){3}[0-9]{1,3}([^0-9]|$)`)
@@ -451,14 +454,8 @@ type telegramReply struct {
 	CallbackText string
 }
 
-func sendTelegramReplyTo(cfg obj, chatID any, reply telegramReply, timeout time.Duration) error {
-	if str(chatID) == "" {
-		chatID = cfg["chat_id"]
-	}
+func telegramReplyPayload(chatID any, reply telegramReply) obj {
 	text := truncateTelegramText(reply.Text)
-	if text == "" {
-		return nil
-	}
 	payload := obj{
 		"chat_id":                  chatID,
 		"text":                     text,
@@ -470,19 +467,156 @@ func sendTelegramReplyTo(cfg obj, chatID any, reply telegramReply, timeout time.
 	if len(reply.ReplyMarkup) > 0 {
 		payload["reply_markup"] = reply.ReplyMarkup
 	}
-	_, err := telegramAPIRequest(cfg, "sendMessage", payload, timeout)
+	return payload
+}
+
+func sendTelegramReplyTo(cfg obj, chatID any, reply telegramReply, timeout time.Duration) error {
+	if str(chatID) == "" {
+		chatID = cfg["chat_id"]
+	}
+	if truncateTelegramText(reply.Text) == "" {
+		return nil
+	}
+	_, err := telegramAPIRequest(cfg, "sendMessage", telegramReplyPayload(chatID, reply), timeout)
 	return err
+}
+
+func telegramCallbackMessageTarget(update obj) (any, int64, bool) {
+	cb := asObj(update["callback_query"])
+	if len(cb) == 0 {
+		return nil, 0, false
+	}
+	message := asObj(cb["message"])
+	if len(message) == 0 {
+		return nil, 0, false
+	}
+	chatID := asObj(message["chat"])["id"]
+	messageID := int64Value(message["message_id"])
+	return chatID, messageID, str(chatID) != "" && messageID > 0
+}
+
+func telegramMessageNotModified(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "message is not modified")
+}
+
+func editTelegramReplyTo(cfg obj, chatID any, messageID int64, reply telegramReply, timeout time.Duration) error {
+	if str(chatID) == "" || messageID <= 0 {
+		return errors.New("telegram edit target missing chat_id or message_id")
+	}
+	if truncateTelegramText(reply.Text) == "" {
+		return nil
+	}
+	payload := telegramReplyPayload(chatID, reply)
+	payload["message_id"] = messageID
+	_, err := telegramAPIRequest(cfg, "editMessageText", payload, timeout)
+	return err
+}
+
+func sendTelegramReplyForUpdate(cfg obj, update obj, reply telegramReply, timeout time.Duration) error {
+	if truncateTelegramText(reply.Text) == "" {
+		return nil
+	}
+	if chatID, messageID, ok := telegramCallbackMessageTarget(update); ok {
+		err := editTelegramReplyTo(cfg, chatID, messageID, reply, timeout)
+		if err == nil || telegramMessageNotModified(err) {
+			return nil
+		}
+		sendErr := sendTelegramReplyTo(cfg, chatID, reply, timeout)
+		if sendErr != nil {
+			return fmt.Errorf("telegram editMessageText failed: %v; fallback sendMessage failed: %w", err, sendErr)
+		}
+		return nil
+	}
+	return sendTelegramReplyTo(cfg, cfg["chat_id"], reply, timeout)
+}
+
+func sendTelegramBatchResult(cfg obj, batch obj, timeout time.Duration) error {
+	text := str(batch["text"])
+	if text == "" {
+		return nil
+	}
+	if int64Value(batch["message_id"]) > 0 {
+		update := obj{"callback_query": obj{"message": obj{
+			"message_id": batch["message_id"],
+			"chat":       obj{"id": batch["chat_id"]},
+		}}}
+		return sendTelegramReplyForUpdate(cfg, update, telegramReply{
+			Text:        text,
+			ReplyMarkup: tgBackKeyboard(),
+		}, timeout)
+	}
+	return sendTelegramMessageTo(cfg, batch["chat_id"], text, timeout)
+}
+
+func recordPendingTGRestartNotice(stateDir, updateVersion string, delaySeconds int) error {
+	if stateDir == "" {
+		return nil
+	}
+	n := now()
+	notice := obj{
+		"kind":              "relaypilot/telegram-restart-notice",
+		"version":           version,
+		"service":           "hub_bot",
+		"update_version":    updateVersion,
+		"delay_seconds":     delaySeconds,
+		"scheduled_at":      n,
+		"expected_after_at": n + int64(delaySeconds),
+	}
+	return writeJSON(telegramRestartNoticePath(stateDir), notice, 0o600)
+}
+
+func clearPendingTGRestartNotice(stateDir string) error {
+	err := os.Remove(telegramRestartNoticePath(stateDir))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
+func pendingTGRestartNoticeText(notice obj) string {
+	lines := []string{
+		"✅ Hub/Bot 已重启完成",
+		"当前版本：" + buildVersion,
+		"完成时间：" + formatUnixLocal(now()),
+	}
+	if updateVersion := str(notice["update_version"]); updateVersion != "" {
+		lines = append(lines, "更新目标："+updateVersion)
+	}
+	if scheduledAt := int64Value(notice["scheduled_at"]); scheduledAt > 0 {
+		lines = append(lines, "安排时间："+formatUnixLocal(scheduledAt))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func sendPendingTGRestartNotice(stateDir string, cfg obj, timeout time.Duration) (bool, error) {
+	notice, err := loadJSON(telegramRestartNoticePath(stateDir))
+	if errors.Is(err, os.ErrNotExist) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if err := sendTelegramMessageTo(cfg, cfg["chat_id"], pendingTGRestartNoticeText(notice), timeout); err != nil {
+		return false, err
+	}
+	if err := clearPendingTGRestartNotice(stateDir); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func answerTelegramCallback(cfg obj, callbackID, text string, timeout time.Duration) error {
 	if callbackID == "" {
 		return nil
 	}
-	_, err := telegramAPIRequest(cfg, "answerCallbackQuery", obj{
+	payload := obj{
 		"callback_query_id": callbackID,
-		"text":              truncateTelegramText(text),
 		"show_alert":        false,
-	}, timeout)
+	}
+	if strings.TrimSpace(text) != "" {
+		payload["text"] = truncateTelegramText(text)
+	}
+	_, err := telegramAPIRequest(cfg, "answerCallbackQuery", payload, timeout)
 	return err
 }
 
@@ -612,7 +746,6 @@ func hubPanelReply(stateDir string) telegramReply {
 			[]any{tgButton("📊 节点列表", "rp:agents"), tgButton("🌐 拓扑", "rp:topology")},
 			[]any{tgButton("📬 最近操作", "rp:results"), tgButton("⬆️ 更新中心", "rp:update")},
 		),
-		CallbackText: "已刷新",
 	}
 }
 
@@ -632,9 +765,8 @@ func agentListReply(stateDir string) telegramReply {
 	appendTGRow(&rows, tgButton("🔁 刷新节点详情", "rp:sync_all"))
 	appendTGRow(&rows, tgButton("⬅️ 返回总控", "rp:panel"))
 	return telegramReply{
-		Text:         formatAgentsText(agents),
-		ReplyMarkup:  tgKeyboard(rows...),
-		CallbackText: "节点列表",
+		Text:        formatAgentsText(agents),
+		ReplyMarkup: tgKeyboard(rows...),
 	}
 }
 
@@ -678,10 +810,9 @@ func agentDetailReply(stateDir, agentID string) telegramReply {
 	)
 	appendTGRow(&rows, tgButton("⬅️ 返回节点列表", "rp:agents"))
 	return telegramReply{
-		Text:         strings.Join(lines, "\n"),
-		ParseMode:    "HTML",
-		ReplyMarkup:  tgKeyboard(rows...),
-		CallbackText: "节点详情",
+		Text:        strings.Join(lines, "\n"),
+		ParseMode:   "HTML",
+		ReplyMarkup: tgKeyboard(rows...),
 	}
 }
 
@@ -858,10 +989,9 @@ func agentRelatedReply(stateDir, agentID string) telegramReply {
 	}
 	appendTGRow(&rows, tgButtonIfSafe("⬅️ 返回节点", "rp:agent:"+agentID))
 	return telegramReply{
-		Text:         strings.Join(lines, "\n"),
-		ParseMode:    "HTML",
-		ReplyMarkup:  tgKeyboard(rows...),
-		CallbackText: "关联节点",
+		Text:        strings.Join(lines, "\n"),
+		ParseMode:   "HTML",
+		ReplyMarkup: tgKeyboard(rows...),
 	}
 }
 
@@ -871,9 +1001,8 @@ func agentTaskResultsReply(stateDir, agentID string) telegramReply {
 		return textPanelReply("❌ " + err.Error())
 	}
 	return telegramReply{
-		Text:         text,
-		ReplyMarkup:  tgKeyboardFromButtons(tgButtonIfSafe("⬅️ 返回节点", "rp:agent:"+agentID)),
-		CallbackText: "最近操作",
+		Text:        text,
+		ReplyMarkup: tgKeyboardFromButtons(tgButtonIfSafe("⬅️ 返回节点", "rp:agent:"+agentID)),
 	}
 }
 
@@ -900,10 +1029,9 @@ func agentRetireReply(stateDir, agentID string) telegramReply {
 	appendTGRow(&rows, tgButtonIfSafe("彻底卸载", "rp:agent:retire-mode:uninstall:"+agentID))
 	appendTGRow(&rows, tgButtonIfSafe("⬅️ 返回节点", "rp:agent:"+agentID))
 	return telegramReply{
-		Text:         strings.Join(lines, "\n"),
-		ParseMode:    "HTML",
-		ReplyMarkup:  tgKeyboard(rows...),
-		CallbackText: "退役节点",
+		Text:        strings.Join(lines, "\n"),
+		ParseMode:   "HTML",
+		ReplyMarkup: tgKeyboard(rows...),
 	}
 }
 
@@ -925,10 +1053,9 @@ func agentRetireConfirmReply(agentID, mode string) telegramReply {
 	appendTGRow(&rows, tgButtonIfSafe("确认执行", "rp:agent:retire-confirm:"+mode+":"+agentID))
 	appendTGRow(&rows, tgButtonIfSafe("⬅️ 返回退役方式", "rp:agent:retire:"+agentID))
 	return telegramReply{
-		Text:         strings.Join(lines, "\n"),
-		ParseMode:    "HTML",
-		ReplyMarkup:  tgKeyboard(rows...),
-		CallbackText: "确认退役",
+		Text:        strings.Join(lines, "\n"),
+		ParseMode:   "HTML",
+		ReplyMarkup: tgKeyboard(rows...),
 	}
 }
 
@@ -938,15 +1065,16 @@ func dispatchHubCommandReply(stateDir, commandText string, cb obj, replyMarkup o
 		return textPanelReply("❌ " + err.Error())
 	}
 	if batchID := extractBatchID(out); batchID != "" {
-		chat := asObj(asObj(cb["message"])["chat"])
-		if err := recordPendingTGBatch(stateDir, batchID, commandText, chat["id"]); err != nil {
+		message := asObj(cb["message"])
+		chat := asObj(message["chat"])
+		if err := recordPendingTGBatchTarget(stateDir, batchID, commandText, chat["id"], message["message_id"]); err != nil {
 			out += "\n⚠️ 汇总跟踪失败：" + err.Error()
 		}
 	}
 	if replyMarkup == nil {
 		replyMarkup = tgBackKeyboard()
 	}
-	return telegramReply{Text: out, ReplyMarkup: replyMarkup, CallbackText: callbackText}
+	return telegramReply{Text: out, ReplyMarkup: replyMarkup}
 }
 
 func agentRetirePreviewReply(stateDir, agentID, mode string, cb obj) telegramReply {
@@ -984,7 +1112,7 @@ func updateCenterReply() telegramReply {
 	lines := []string{
 		"⬆️ <b>RelayPilot 更新中心</b>",
 		"当前 Hub 版本：" + htmlCode(buildVersion),
-		"默认：latest + 重启",
+		"默认：latest + 检查后重启",
 		"",
 		"流程：选择目标 → 确认执行。",
 		"建议：Hub → 单个 Agent → 按角色批量 → 全 Agent。",
@@ -996,7 +1124,6 @@ func updateCenterReply() telegramReply {
 			[]any{tgButton("⬆️ 更新 Hub", "rp:upd:hub"), tgButton("⬆️ 更新 Agent", "rp:upd:agent")},
 			[]any{tgButton("⬅️ 返回总控", "rp:panel")},
 		),
-		CallbackText: "更新中心",
 	}
 }
 
@@ -1008,7 +1135,7 @@ func updateAgentPickerReply(stateDir string) telegramReply {
 	lines := []string{
 		"⬆️ <b>选择 Agent 更新范围</b>",
 		"",
-		"默认：latest + 重启 Agent 服务。",
+		"默认：latest + 检查后重启 Agent 服务。",
 		"建议先选单个节点 canary，再更新角色或全部。",
 	}
 	selectable := make([]obj, 0, len(agents))
@@ -1040,10 +1167,9 @@ func updateAgentPickerReply(stateDir string) telegramReply {
 	}
 	rows = append(rows, []any{tgButton("⬅️ 返回更新中心", "rp:update")})
 	return telegramReply{
-		Text:         strings.Join(lines, "\n"),
-		ParseMode:    "HTML",
-		ReplyMarkup:  tgKeyboard(rows...),
-		CallbackText: "选择更新范围",
+		Text:        strings.Join(lines, "\n"),
+		ParseMode:   "HTML",
+		ReplyMarkup: tgKeyboard(rows...),
 	}
 }
 
@@ -1073,30 +1199,30 @@ func updateConfirmReplyWithBack(selector, backOverride string) telegramReply {
 	}
 	targetLabel := updateTargetLabel(selector)
 	back := "rp:upd:agent"
-	executeLine := "执行：确认后下发任务，Agent 轮询领取。"
+	executeLine := "执行：先检查目标版本；需要时更新并重启 Agent 服务。"
+	buttonText := "检查并更新/重启"
 	if selector == "hub" {
 		back = "rp:update"
-		executeLine = "执行：确认后更新 Hub，并重启 Hub/Bot 服务。"
+		executeLine = "执行：先检查当前/最新版本；有新版本才更新并重启 Hub/Bot。"
 	}
 	if backOverride != "" {
 		back = backOverride
 	}
 	lines := []string{
-		"⬆️ <b>确认更新</b>",
+		"⬆️ <b>检查并更新</b>",
 		"",
 		"目标：" + html.EscapeString(targetLabel),
-		"版本：latest",
-		"重启：是",
+		"目标版本：latest",
+		"重启：需要更新时自动重启",
 		executeLine,
 	}
 	return telegramReply{
 		Text:      strings.Join(lines, "\n"),
 		ParseMode: "HTML",
 		ReplyMarkup: tgKeyboard(
-			[]any{tgButton("确认更新并重启", "rp:upd:run:"+selector)},
+			[]any{tgButton(buttonText, "rp:upd:run:"+selector)},
 			[]any{tgButton("⬅️ 返回", back)},
 		),
-		CallbackText: "确认更新",
 	}
 }
 
@@ -1121,6 +1247,20 @@ func updateCallbackReply(stateDir, data string, cb obj) telegramReply {
 		return dispatchHubCommandFromCallback(stateDir, "/relaypilot_up "+selector, cb)
 	default:
 		return textPanelReply("❌ 未识别更新操作")
+	}
+}
+
+func topologyPanelReply(stateDir string) telegramReply {
+	out, err := hubDispatchCommand(stateDir, "/topology")
+	if err != nil {
+		return textPanelReply("❌ " + err.Error())
+	}
+	return telegramReply{
+		Text: out,
+		ReplyMarkup: tgKeyboard(
+			[]any{tgButton("🧪 链路检测", "rp:probe_help")},
+			[]any{tgButton("⬅️ 返回总控", "rp:panel")},
+		),
 	}
 }
 
@@ -1190,7 +1330,7 @@ func agentCallbackReply(stateDir, data string, cb obj) telegramReply {
 }
 
 func textPanelReply(text string) telegramReply {
-	return telegramReply{Text: text, ReplyMarkup: tgBackKeyboard(), CallbackText: "OK"}
+	return telegramReply{Text: text, ReplyMarkup: tgBackKeyboard()}
 }
 
 func runTelegramHubDaemon(stateDir string, interval, timeout, limit int, quiet bool) error {
@@ -1208,10 +1348,21 @@ func runTelegramHubDaemon(stateDir string, interval, timeout, limit int, quiet b
 	}
 	offset := int64(0)
 	backoff := time.Duration(interval) * time.Second
+	restartNoticeSent := false
 	for {
 		cfg, err := loadTelegramConfig(stateDir)
 		if err != nil {
 			return err
+		}
+		if !restartNoticeSent {
+			done, err := sendPendingTGRestartNotice(stateDir, cfg, 10*time.Second)
+			if err != nil {
+				if !quiet {
+					fmt.Fprintf(os.Stderr, "telegram restart notice send error: %v\n", err)
+				}
+			} else {
+				restartNoticeSent = done
+			}
 		}
 		resp, err := telegramAPIRequest(cfg, "getUpdates", obj{
 			"offset":          offset,
@@ -1249,12 +1400,11 @@ func runTelegramHubDaemon(stateDir string, interval, timeout, limit int, quiet b
 				continue
 			}
 			if cb := asObj(update["callback_query"]); len(cb) > 0 {
-				callbackText := firstNonEmpty(reply.CallbackText, "OK")
-				if err := answerTelegramCallback(cfg, str(cb["id"]), callbackText, 5*time.Second); err != nil && !quiet {
+				if err := answerTelegramCallback(cfg, str(cb["id"]), reply.CallbackText, 5*time.Second); err != nil && !quiet {
 					fmt.Fprintf(os.Stderr, "telegram answerCallbackQuery error: %v\n", err)
 				}
 			}
-			if err := sendTelegramReplyTo(cfg, cfg["chat_id"], reply, 10*time.Second); err != nil && !quiet {
+			if err := sendTelegramReplyForUpdate(cfg, update, reply, 10*time.Second); err != nil && !quiet {
 				fmt.Fprintf(os.Stderr, "telegram sendMessage error: %v\n", err)
 			}
 		}
@@ -1265,7 +1415,7 @@ func runTelegramHubDaemon(stateDir string, interval, timeout, limit int, quiet b
 			}
 		} else {
 			for _, batch := range ready {
-				if err := sendTelegramMessageTo(cfg, batch["chat_id"], str(batch["text"]), 10*time.Second); err != nil && !quiet {
+				if err := sendTelegramBatchResult(cfg, batch, 10*time.Second); err != nil && !quiet {
 					fmt.Fprintf(os.Stderr, "telegram batch result send error: %v\n", err)
 				}
 			}
@@ -1291,10 +1441,9 @@ func operationGuideReply() telegramReply {
 		"提示：公网 IP 模式只做可见性；真正对外服务地址用“公网入口”。",
 	}
 	return telegramReply{
-		Text:         strings.Join(lines, "\n"),
-		ParseMode:    "HTML",
-		ReplyMarkup:  tgBackKeyboard(),
-		CallbackText: "操作向导",
+		Text:        strings.Join(lines, "\n"),
+		ParseMode:   "HTML",
+		ReplyMarkup: tgBackKeyboard(),
 	}
 }
 
@@ -1376,10 +1525,9 @@ func probeHelpReply(stateDir string) telegramReply {
 		}
 	}
 	return telegramReply{
-		Text:         strings.Join(lines, "\n"),
-		ParseMode:    "HTML",
-		ReplyMarkup:  tgBackKeyboard(),
-		CallbackText: "链路检测",
+		Text:        strings.Join(lines, "\n"),
+		ParseMode:   "HTML",
+		ReplyMarkup: tgBackKeyboard(),
 	}
 }
 
@@ -1409,18 +1557,7 @@ func handleTelegramHubReply(stateDir string, update obj) telegramReply {
 		case "rp:update":
 			return updateCenterReply()
 		case "rp:topology":
-			out, err := hubDispatchCommand(stateDir, "/topology")
-			if err != nil {
-				return textPanelReply("❌ " + err.Error())
-			}
-			return telegramReply{
-				Text: out,
-				ReplyMarkup: tgKeyboard(
-					[]any{tgButton("🧪 链路检测", "rp:probe_help")},
-					[]any{tgButton("⬅️ 返回总控", "rp:panel")},
-				),
-				CallbackText: "拓扑",
-			}
+			return topologyPanelReply(stateDir)
 		case "rp:agents":
 			return agentListReply(stateDir)
 		case "rp:results":
@@ -1457,6 +1594,22 @@ func handleTelegramHubReply(stateDir string, update obj) telegramReply {
 	command := normalizeTelegramCommand(rawCommand)
 	if command == "relaypilot" || command == "panel" {
 		return hubPanelReply(stateDir)
+	}
+	switch command {
+	case "agents":
+		return agentListReply(stateDir)
+	case "topology", "tree":
+		return topologyPanelReply(stateDir)
+	case "results":
+		out, err := hubDispatchCommand(stateDir, text)
+		if err != nil {
+			return telegramReply{Text: "❌ " + err.Error()}
+		}
+		return textPanelReply(out)
+	case "update", "upgrade":
+		if len(strings.Fields(text)) == 1 {
+			return updateCenterReply()
+		}
 	}
 	out, err := hubDispatchCommand(stateDir, text)
 	if err != nil {
