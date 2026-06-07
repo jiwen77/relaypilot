@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="${RELAYPILOT_VERSION:-0.1.12}"
+VERSION="${RELAYPILOT_VERSION:-0.1.15}"
 REPO="${REPO:-jiwen77/relaypilot}"
 RAW_REF="${RAW_REF:-main}"
+RAW_BASE_USER_SET="${RAW_BASE:+1}"
 RAW_BASE="${RAW_BASE:-https://github.com/${REPO}/raw/${RAW_REF}}"
 RELEASE_BASE="${RELEASE_BASE:-https://github.com/${REPO}/releases/download}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/relaypilot}"
@@ -693,6 +694,34 @@ installed_core_version() {
   sed -nE 's/^RelayPilot Go core[[:space:]]+(.+)$/\1/p' <<<"$out" | head -n 1
 }
 
+script_default_version() {
+  local script="$1"
+  [[ -f "$script" ]] || return 1
+  sed -nE 's/^VERSION="\$\{RELAYPILOT_VERSION:-([^}]+)\}"$/\1/p' "$script" | head -n 1
+}
+
+core_file_version() {
+  local core="$1" out
+  [[ -x "$core" ]] || return 1
+  out="$("$core" version 2>/dev/null || true)"
+  sed -nE 's/^RelayPilot Go core[[:space:]]+(.+)$/\1/p' <<<"$out" | head -n 1
+}
+
+verify_release_pair_versions() {
+  local script="$1" core="$2" script_version core_version
+  script_version="$(script_default_version "$script" || true)"
+  core_version="$(core_file_version "$core" || true)"
+  if [[ -z "$script_version" || -z "$core_version" ]]; then
+    err "无法验证更新版本一致性：script=${script_version:-未识别}, core=${core_version:-未识别}"
+    return 1
+  fi
+  if [[ "$(normalize_version "$script_version")" != "$(normalize_version "$core_version")" ]]; then
+    err "拒绝安装版本不一致的更新：面板脚本 ${script_version}，Go core ${core_version}"
+    return 1
+  fi
+  info "版本一致：面板 ${script_version} / Go core ${core_version}"
+}
+
 resolve_latest_update_version() {
   local raw_base="$1" tmp resolved=""
   if [[ -n "${RELAYPILOT_REMOTE_VERSION:-}" ]]; then
@@ -762,6 +791,12 @@ core_cmd() {
     return 1
   fi
   "$GO_CORE" "$cmd" "$@"
+}
+
+core_binary_supports() {
+  local cmd="$1"
+  [[ -x "$GO_CORE" ]] || return 1
+  "$GO_CORE" help 2>/dev/null | grep -Eq "^[[:space:]]+${cmd}([[:space:]]|$)"
 }
 
 ensure_singbox() {
@@ -1312,12 +1347,12 @@ install_self() {
 
 self_update() {
   require_root
-  local version="${UPDATE_VERSION:-latest}" restart_services="${RELAYPILOT_UPDATE_RESTART:-ask}" raw_base="$RAW_BASE" release_base="$RELEASE_BASE" force=0
+  local version="${UPDATE_VERSION:-latest}" restart_services="${RELAYPILOT_UPDATE_RESTART:-ask}" raw_base="$RAW_BASE" release_base="$RELEASE_BASE" force=0 raw_base_overridden="${RAW_BASE_USER_SET:-0}"
   RELAYPILOT_UPDATE_NOOP=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --version) version="$2"; shift 2 ;;
-      --raw-base) raw_base="$2"; shift 2 ;;
+      --raw-base) raw_base="$2"; raw_base_overridden=1; shift 2 ;;
       --release-base) release_base="$2"; shift 2 ;;
       --restart-services) restart_services=yes; shift ;;
       --no-restart-services) restart_services=no; shift ;;
@@ -1342,13 +1377,20 @@ self_update() {
     fi
   fi
 
-  local platform asset url tmp script_tmp asset_tmp checksum
+  local platform asset url tmp script_tmp asset_tmp checksum script_raw_base
   platform="$(arch_name)"
   asset="relaypilot_${platform}"
   if [[ "$version" != latest ]]; then
     url="${release_base}/${version}/${asset}"
   else
     url="https://github.com/${REPO}/releases/latest/download/${asset}"
+  fi
+  if [[ "$raw_base_overridden" == "1" ]]; then
+    script_raw_base="$raw_base"
+  elif [[ -n "$target_version" ]]; then
+    script_raw_base="https://github.com/${REPO}/raw/${target_version}"
+  else
+    script_raw_base="$raw_base"
   fi
 
   tmp="$(mktemp -d /tmp/relaypilot-update.XXXXXX)"
@@ -1358,8 +1400,8 @@ self_update() {
   asset_tmp="${tmp}/${asset}"
   checksum="${tmp}/${asset}.sha256"
 
-  info "下载入口脚本：${raw_base}/relaypilot.sh"
-  fetch "${raw_base}/relaypilot.sh" "$script_tmp"
+  info "下载入口脚本：${script_raw_base}/relaypilot.sh"
+  fetch "${script_raw_base}/relaypilot.sh" "$script_tmp"
   info "下载 Go core：$url"
   fetch "$url" "$asset_tmp"
   chmod +x "$script_tmp" "$asset_tmp"
@@ -1373,6 +1415,7 @@ self_update() {
   else
     warn "未找到 sha256 文件，跳过校验。"
   fi
+  verify_release_pair_versions "$script_tmp" "$asset_tmp"
 
   mkdir -p "$INSTALL_DIR/bin" "$(dirname "$BIN_PATH")"
   [[ -f "$INSTALL_DIR/relaypilot.sh" ]] && cp -a "$INSTALL_DIR/relaypilot.sh" "$INSTALL_DIR/relaypilot.sh.prev"
@@ -1642,7 +1685,28 @@ doctor() {
 list_endpoints() { core_cmd list-endpoints --state-dir "$STATE_DIR"; }
 show_endpoint() { local name="${1:-}"; [[ -z "$name" ]] && prompt name "出口名称" "${ENDPOINT_NAME:-landing}"; core_cmd export-endpoint --state-dir "$STATE_DIR" "$name"; }
 inspect_conf() { local conf="${1:-}"; [[ -z "$conf" ]] && { if [[ -d "$CONF_DIR" ]]; then conf="$CONF_DIR"; else conf="$SINGBOX_CONFIG_PATH"; fi; }; core_cmd inspect-conf --conf "$conf"; }
-connection_info() { local conf="${1:-}"; [[ -z "$conf" ]] && { if [[ -d "$CONF_DIR" ]]; then conf="$CONF_DIR"; else conf="$SINGBOX_CONFIG_PATH"; fi; }; core_cmd agent-connection-info --state-dir "$STATE_DIR" --conf "$conf"; }
+connection_info() {
+  local conf="${1:-}" endpoint_file endpoint_name
+  [[ -z "$conf" ]] && { if [[ -d "$CONF_DIR" ]]; then conf="$CONF_DIR"; else conf="$SINGBOX_CONFIG_PATH"; fi; }
+  if core_binary_supports agent-connection-info; then
+    core_cmd agent-connection-info --state-dir "$STATE_DIR" --conf "$conf"
+    return
+  fi
+  warn "当前 Go core 不支持 agent-connection-info，已降级显示可用出口/配置摘要；请更新到包含该命令的 release。"
+  title "落地出口"
+  if [[ -d "$STATE_DIR/endpoints" ]] && compgen -G "$STATE_DIR/endpoints/*.json" >/dev/null; then
+    while IFS= read -r endpoint_file; do
+      [[ -f "$endpoint_file" ]] || continue
+      endpoint_name="$(basename "$endpoint_file" .json)"
+      core_cmd export-endpoint --state-dir "$STATE_DIR" "$endpoint_name" || cat "$endpoint_file"
+      echo
+    done < <(find "$STATE_DIR/endpoints" -maxdepth 1 -type f -name '*.json' | sort)
+  else
+    echo "暂无落地出口。"
+  fi
+  title "配置摘要"
+  core_cmd inspect-conf --conf "$conf" || true
+}
 migrate_state() { core_cmd migrate-state "$@"; }
 public_entry_set() { core_cmd public-entry-set --state-dir "$STATE_DIR" "$@"; }
 public_entry_list() { core_cmd public-entry-list --state-dir "$STATE_DIR" "$@"; }
@@ -2844,12 +2908,14 @@ agent_unenrolled_menu() {
     menu_item 1 "接入 Hub"
     menu_item 2 "代理配置"
     menu_item 3 "连接信息"
+    menu_item 4 "更新 Agent 程序"
     menu_back
-    menu_prompt choice "0-3"
+    menu_prompt choice "0-4"
     case "${choice:-}" in
       1) menu_action agent_join_wizard ;;
       2) agent_role_config_menu ;;
       3) menu_action connection_info ;;
+      4) menu_update_and_reload --reopen agent ;;
       0) return 0 ;;
       *) menu_invalid_choice ;;
     esac
@@ -2874,15 +2940,17 @@ agent_mode_menu() {
     menu_item 2 "连接信息"
     menu_item 3 "网络设置"
     menu_item 4 "Agent 服务"
-    menu_item 5 "高级操作"
+    menu_item 5 "更新 Agent 程序"
+    menu_item 6 "高级操作"
     menu_back
-    menu_prompt choice "0-5"
+    menu_prompt choice "0-6"
     case "${choice:-}" in
       1) agent_role_config_menu ;;
       2) menu_action connection_info ;;
       3) agent_network_menu ;;
       4) service_control_menu "$AGENT_SERVICE_NAME" "Agent 服务" ;;
-      5) agent_advanced_menu ;;
+      5) menu_update_and_reload --reopen agent ;;
+      6) agent_advanced_menu ;;
       0) return 0 ;;
       *) menu_invalid_choice ;;
     esac
@@ -3239,8 +3307,13 @@ show_service_logs() {
 }
 
 menu_update_and_reload() {
-  local rc
+  local rc reopen_mode="menu"
+  if [[ "${1:-}" == "--reopen" ]]; then
+    reopen_mode="${2:-menu}"
+    shift 2
+  fi
   menu_clear
+  info "更新范围：当前机器上的 RelayPilot 脚本 + Go core；不会自动更新其它 Hub/Agent 节点。"
   set +e
   self_update "$@"
   rc=$?
@@ -3258,7 +3331,11 @@ menu_update_and_reload() {
   info "已更新，正在重新打开新版面板..."
   sleep 1
   menu_leave_screen
-  exec "$BIN_PATH" menu
+  case "$reopen_mode" in
+    hub) exec "$BIN_PATH" hub ;;
+    agent) exec "$BIN_PATH" agent ;;
+    *) exec "$BIN_PATH" menu ;;
+  esac
 }
 
 services_menu() {
@@ -3271,7 +3348,7 @@ services_menu() {
     menu_item 3 "Telegram 服务"
     menu_item 4 "sing-box 服务"
     menu_item 5 "资源限制"
-    menu_item 6 "更新 RelayPilot"
+    menu_item 6 "更新程序"
     menu_back
     menu_prompt choice "0-6"
     case "${choice:-}" in
@@ -3401,10 +3478,12 @@ hub_bootstrap_menu() {
     printf "  初始化会配置 Hub 对外地址、HTTPS/mTLS 证书，并安装 Hub 服务。\n"
     echo
     menu_item 1 "初始化 Hub"
+    menu_item 2 "更新 Hub 程序"
     menu_back
-    menu_prompt choice "0-1"
+    menu_prompt choice "0-2"
     case "${choice:-}" in
       1) menu_action hub_quick_setup ;;
+      2) menu_update_and_reload --reopen hub ;;
       0) return 0 ;;
       *) menu_invalid_choice ;;
     esac
@@ -3426,9 +3505,10 @@ hub_menu() {
     menu_item 5 "Telegram"
     menu_item 6 "最近操作"
     menu_item 7 "离线告警"
-    menu_item 8 "高级操作"
+    menu_item 8 "更新 Hub 程序"
+    menu_item 9 "高级操作"
     menu_back
-    menu_prompt choice "0-8"
+    menu_prompt choice "0-9"
     case "${choice:-}" in
       1) menu_action hub_enroll_wizard ;;
       2) menu_action hub_link_wizard ;;
@@ -3437,7 +3517,8 @@ hub_menu() {
       5) hub_telegram_menu ;;
       6) menu_action hub_results ;;
       7) hub_alerts_menu ;;
-      8) hub_advanced_menu ;;
+      8) menu_update_and_reload --reopen hub ;;
+      9) hub_advanced_menu ;;
       0) return 0 ;;
       *) menu_invalid_choice ;;
     esac
@@ -3595,13 +3676,15 @@ main_menu() {
     menu_title "RelayPilot 安装"
     menu_item 1 "安装/进入 Hub"
     menu_item 2 "安装/进入 Agent"
-    menu_item 3 "卸载 RelayPilot"
+    menu_item 3 "更新程序"
+    menu_item 4 "卸载 RelayPilot"
     menu_back "退出"
-    menu_prompt choice "0-3"
+    menu_prompt choice "0-4"
     case "${choice:-}" in
       1) hub_install_wizard ;;
       2) agent_install_wizard ;;
-      3) uninstall_relaypilot_menu ;;
+      3) menu_update_and_reload ;;
+      4) uninstall_relaypilot_menu ;;
       0) exit 0 ;;
       *) menu_invalid_choice ;;
     esac

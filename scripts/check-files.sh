@@ -67,6 +67,19 @@ do
   check_exec "$path"
 done
 
+repo_version="$(tr -d '[:space:]' < VERSION)"
+shell_version="$(sed -nE 's/^VERSION="\$\{RELAYPILOT_VERSION:-([^}]+)\}"$/\1/p' relaypilot.sh | head -n 1)"
+if [[ "$shell_version" != "$repo_version" ]]; then
+  errors+=("relaypilot.sh: VERSION default ($shell_version) must match VERSION file ($repo_version)")
+fi
+
+if grep -q 'fetch "\$RAW_BASE/relaypilot.sh"' install-relaypilot.sh; then
+  errors+=("install-relaypilot.sh: must not pair raw main relaypilot.sh with latest release core")
+fi
+if grep -q 'fetch "\${raw_base}/relaypilot.sh"' relaypilot.sh; then
+  errors+=("relaypilot.sh: self_update must fetch relaypilot.sh from the selected release tag unless --raw-base is explicit")
+fi
+
 if ((${#errors[@]} > 0)); then
   printf '%s\n' "${errors[@]}" >&2
   exit 1

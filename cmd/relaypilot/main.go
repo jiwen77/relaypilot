@@ -1144,6 +1144,7 @@ Commands:
   render-outbound ENDPOINT_JSON
   import-endpoint [--state-dir DIR] ENDPOINT_JSON
   export-endpoint [--state-dir DIR] NAME
+  agent-connection-info [--state-dir DIR] [--conf PATH] [--auth-user USER] [--json]
   public-entry-set --use shadowsocks|wireguard|reality --name NAME --host HOST --public-port PORT --local-port PORT
   public-entry-list [--state-dir DIR] [--json]
   bind-transit --conf PATH --endpoint ENDPOINT_JSON [--auth-user USER]

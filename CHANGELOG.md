@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Keep installer/self-update entrypoint scripts pinned to the selected release tag by default, preventing raw `main` scripts from pairing with older latest-release Go cores.
+- Let `connection-info` degrade to endpoint/config summaries when the installed Go core lacks `agent-connection-info`, and add release consistency checks for version drift.
+
 ## 0.1.14 - 2026-06-06
 
 - Keep the Telegram Hub panel in one editable card for button navigation, with text-command aliases opening the same button pages.

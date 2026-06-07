@@ -292,6 +292,45 @@ STATE_DIR="$ROOT/state" bash ./relaypilot.sh public-entry-list > "$ROOT/public-e
 STATE_DIR="$ROOT/state" CONF_DIR="$ROOT/transit-conf" bash ./relaypilot.sh connection-info > "$ROOT/connection-info.out"
 STATE_DIR="$ROOT/socks-state" SINGBOX_CONFIG_PATH="$ROOT/socks-config.json" bash ./relaypilot.sh connection-info "$ROOT/socks-config.json" > "$ROOT/socks-connection-info.out"
 
+cat > "$ROOT/bin/relaypilot-old-core" <<'STUB'
+#!/usr/bin/env bash
+cmd="${1:-}"
+shift || true
+case "$cmd" in
+  help|--help|-h)
+    cat <<'EOF_HELP'
+RelayPilot Go core
+Commands:
+  export-endpoint [--state-dir DIR] NAME
+  inspect-conf [--conf PATH] [--json]
+EOF_HELP
+    ;;
+  version)
+    echo "RelayPilot Go core 0.1.14"
+    ;;
+  export-endpoint)
+    state_dir="/etc/relaypilot"
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --state-dir) state_dir="$2"; shift 2 ;;
+        *) name="$1"; shift ;;
+      esac
+    done
+    cat "$state_dir/endpoints/${name:?}.json"
+    ;;
+  inspect-conf)
+    echo '{"summary":"legacy inspect fallback"}'
+    ;;
+  *)
+    echo "ERROR: unknown command: $cmd" >&2
+    exit 2
+    ;;
+esac
+STUB
+chmod +x "$ROOT/bin/relaypilot-old-core"
+STATE_DIR="$ROOT/state" CONF_DIR="$ROOT/transit-conf" RELAYPILOT_GO_BIN="$ROOT/bin/relaypilot-old-core" \
+  bash ./relaypilot.sh connection-info > "$ROOT/connection-info-legacy-core.out" 2> "$ROOT/connection-info-legacy-core.err"
+
 printf '0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
   bash ./relaypilot.sh > "$ROOT/install-menu.out"
 printf '0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
@@ -304,7 +343,7 @@ printf '0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
   bash ./relaypilot.sh services > "$ROOT/service-menu.out"
 printf '2\n0\n0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
   bash ./relaypilot.sh services > "$ROOT/hub-service-menu.out"
-printf '3\n0\n0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
+printf '4\n0\n0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
   bash ./relaypilot.sh > "$ROOT/uninstall-menu.out"
 printf '0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
   bash ./relaypilot.sh agent > "$ROOT/agent-direct-menu.out"
@@ -314,7 +353,7 @@ printf '3\n0\n0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/ip-state" \
   bash ./relaypilot.sh agent > "$ROOT/agent-network-menu.out"
 printf '4\n0\n0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/ip-state" \
   bash ./relaypilot.sh agent > "$ROOT/agent-service-missing-menu.out"
-printf '5\n1\n0\n0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/ip-state" \
+printf '6\n1\n0\n0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/ip-state" \
   bash ./relaypilot.sh agent > "$ROOT/agent-advanced-menu.out"
 printf '0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/ip-state" \
   bash ./relaypilot.sh agent > "$ROOT/agent-direct-connected.out"
@@ -386,7 +425,7 @@ printf '2\n1\n1\n1\n\n\n0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/quick-hub" 
   bash ./relaypilot.sh hub > "$ROOT/hub-link-wizard.out"
 printf '1\n4\n0\n0\n0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/quick-hub" \
   bash ./relaypilot.sh > "$ROOT/hub-agents-menu.out"
-printf '1\n8\n0\n0\n0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/quick-hub" \
+printf '1\n9\n0\n0\n0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/quick-hub" \
   bash ./relaypilot.sh > "$ROOT/hub-advanced-menu.out"
 printf '1\n5\n0\n0\n0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/quick-hub" \
   bash ./relaypilot.sh > "$ROOT/hub-telegram-menu.out"
@@ -494,6 +533,7 @@ grep -q 'landing-hk-ss' "$ROOT/tg-dispatch.out"
 grep -q 'RelayPilot 安装 v.* · 当前：未配置' "$ROOT/install-menu.out"
 grep -q '安装/进入 Hub' "$ROOT/install-menu.out"
 grep -q '安装/进入 Agent' "$ROOT/install-menu.out"
+grep -q '更新程序' "$ROOT/install-menu.out"
 grep -q '卸载 RelayPilot' "$ROOT/install-menu.out"
 if grep -q '本机服务' "$ROOT/install-menu.out"; then
   echo "relaypilot install menu should not expose service management" >&2
@@ -511,6 +551,7 @@ grep -q 'Agent 尚未接入 Hub' "$ROOT/agent-menu.out"
 grep -q '接入 Hub' "$ROOT/agent-menu.out"
 grep -q '代理配置' "$ROOT/agent-menu.out"
 grep -q '连接信息' "$ROOT/agent-menu.out"
+grep -q '更新 Agent 程序' "$ROOT/agent-menu.out"
 if grep -q '接入信息\|退出 Hub 托管\|重置 Agent\|配置中转 Reality\|配置落地出口' "$ROOT/agent-menu.out"; then
   echo "unenrolled Agent mode should hide connected-only and destructive actions" >&2
   exit 1
@@ -523,6 +564,7 @@ grep -q 'Agent：○ 已接入/服务未安装' "$ROOT/agent-menu-connected.out"
 grep -q '代理配置' "$ROOT/agent-menu-connected.out"
 grep -q '网络设置' "$ROOT/agent-menu-connected.out"
 grep -q '连接信息' "$ROOT/agent-menu-connected.out"
+grep -q '更新 Agent 程序' "$ROOT/agent-menu-connected.out"
 grep -q '高级操作' "$ROOT/agent-menu-connected.out"
 if grep -q 'Hub 接入信息\|IP 模式\|公网入口' "$ROOT/agent-menu-connected.out"; then
   echo "Hub enrollment and detailed network settings should not live in the Agent main menu" >&2
@@ -543,6 +585,7 @@ if grep -q '退出 Hub 托管' "$ROOT/agent-menu-connected.out" || grep -q '重�
 fi
 grep -q 'Hub 尚未初始化' "$ROOT/hub-menu.out"
 grep -q '初始化 Hub' "$ROOT/hub-menu.out"
+grep -q '更新 Hub 程序' "$ROOT/hub-menu.out"
 if grep -q '生成邀请码' "$ROOT/hub-menu.out" || grep -q '串联节点' "$ROOT/hub-menu.out"; then
   echo "uninitialized Hub mode should only offer initialization/back, not operational actions" >&2
   exit 1
@@ -608,11 +651,16 @@ grep -q 'name: "la-direct-socks"' "$ROOT/socks-connection-info.out"
 grep -q 'type: socks5' "$ROOT/socks-connection-info.out"
 grep -q 'username: "sub2api"' "$ROOT/socks-connection-info.out"
 grep -q 'password: "secret-pass"' "$ROOT/socks-connection-info.out"
+grep -q '不支持 agent-connection-info' "$ROOT/connection-info-legacy-core.err"
+grep -q '落地出口' "$ROOT/connection-info-legacy-core.out"
+grep -q '"name": "hk"' "$ROOT/connection-info-legacy-core.out"
+grep -q 'legacy inspect fallback' "$ROOT/connection-info-legacy-core.out"
 grep -q 'Hub 模式' "$ROOT/hub-menu-ready.out"
 grep -q '生成邀请码' "$ROOT/hub-menu-ready.out"
 grep -q '串联节点' "$ROOT/hub-menu-ready.out"
 grep -q '最近操作' "$ROOT/hub-menu-ready.out"
 grep -q 'Telegram' "$ROOT/hub-menu-ready.out"
+grep -q '更新 Hub 程序' "$ROOT/hub-menu-ready.out"
 grep -q '高级操作' "$ROOT/hub-menu-ready.out"
 if grep -q '任务队列' "$ROOT/hub-menu-ready.out" || grep -q '恢复超时任务' "$ROOT/hub-menu-ready.out" || grep -q '重置 Hub' "$ROOT/hub-menu-ready.out"; then
   echo "Hub main menu should expose results, not raw task internals" >&2
@@ -649,7 +697,7 @@ grep -q '刷新全部节点详情' "$ROOT/hub-agents-menu.out"
 grep -q '本机服务' "$ROOT/service-menu.out"
 grep -q '状态 / 启动' "$ROOT/service-menu.out"
 grep -q '资源限制' "$ROOT/service-menu.out"
-grep -q '更新 RelayPilot' "$ROOT/service-menu.out"
+grep -q '更新程序' "$ROOT/service-menu.out"
 grep -q 'relaypilot-agent' "$ROOT/service-menu.out"
 grep -q 'Hub 服务' "$ROOT/hub-service-menu.out"
 if grep -q '清除失败状态' "$ROOT/hub-service-menu.out"; then
@@ -817,6 +865,7 @@ grep -q 'CPUQuota=25%' "$ROOT/systemd/relay-smoke-tg.service"
 
 mkdir -p "$ROOT/release/v-local" "$ROOT/raw"
 cp ./relaypilot.sh "$ROOT/raw/relaypilot.sh"
+sed -i 's/^VERSION="${RELAYPILOT_VERSION:-[^}]*}"/VERSION="${RELAYPILOT_VERSION:-v-local}"/' "$ROOT/raw/relaypilot.sh"
 go build -trimpath -ldflags "-X main.buildVersion=v-local" -o "$ROOT/release/v-local/relaypilot_linux_amd64" ./cmd/relaypilot
 (cd "$ROOT/release/v-local" && sha256sum relaypilot_linux_amd64 > relaypilot_linux_amd64.sha256)
 RAW_BASE="file://$ROOT/raw" \
@@ -855,6 +904,21 @@ RELAYPILOT_NO_ROOT=1 \
 bash ./relaypilot.sh update --version v-local --force --no-restart-services > "$ROOT/update-force.out" 2> "$ROOT/update-force.err"
 assert_path_absent "$ROOT/bin/relaypilot-hub"
 assert_path_absent "$ROOT/bin/relaypilot-agent"
+mkdir -p "$ROOT/raw-mismatch"
+cp ./relaypilot.sh "$ROOT/raw-mismatch/relaypilot.sh"
+set +e
+RAW_BASE="file://$ROOT/raw-mismatch" \
+RELEASE_BASE="file://$ROOT/release" \
+INSTALL_DIR="$ROOT/update-mismatch-dir" \
+BIN_PATH="$ROOT/bin/relaypilot-mismatch" \
+RELAYPILOT_NO_ROOT=1 \
+bash ./relaypilot.sh update --version v-local --force --no-restart-services > "$ROOT/update-mismatch.out" 2> "$ROOT/update-mismatch.err"
+mismatch_rc=$?
+set -e
+if [[ "$mismatch_rc" == "0" ]]; then
+  echo "mismatched panel/core update should fail" >&2
+  exit 1
+fi
 mkdir -p "$ROOT/fake-update-bin"
 cat > "$ROOT/fake-update-bin/systemctl" <<'EOF_SYSTEMCTL'
 #!/usr/bin/env bash
@@ -899,11 +963,15 @@ assert_path_absent "$ROOT/bin/relaypilot-agent"
 mkdir -p "$ROOT/raw-enroll" "$ROOT/release-enroll/v-local"
 cat > "$ROOT/raw-enroll/relaypilot.sh" <<'EOF_STUB_ENTRYPOINT'
 #!/usr/bin/env bash
+VERSION="${RELAYPILOT_VERSION:-v-local}"
 printf '%s\n' "$*" >> "${RELAYPILOT_INSTALL_DISPATCH_LOG:?}"
 EOF_STUB_ENTRYPOINT
 chmod +x "$ROOT/raw-enroll/relaypilot.sh"
 cat > "$ROOT/release-enroll/v-local/relaypilot_linux_amd64" <<'EOF_STUB_CORE'
 #!/usr/bin/env bash
+if [[ "${1:-}" == "version" ]]; then
+  echo "RelayPilot Go core v-local"
+fi
 exit 0
 EOF_STUB_CORE
 chmod +x "$ROOT/release-enroll/v-local/relaypilot_linux_amd64"
@@ -959,13 +1027,17 @@ bash ./relaypilot.sh install > "$ROOT/install.out" 2> "$ROOT/install.err"
 
 grep -q '已更新 RelayPilot' "$ROOT/update.out"
 grep -q 'RelayPilot Go core v-local' "$ROOT/update.out"
+grep -q '版本一致：面板 v-local / Go core v-local' "$ROOT/update.out"
+grep -q '^VERSION="${RELAYPILOT_VERSION:-v-local}"$' "$ROOT/update-dir/relaypilot.sh"
 grep -q '已是最新版本：v-local' "$ROOT/update-skip.out"
 ! grep -q '下载 Go core' "$ROOT/update-skip.out"
 grep -q '已是最新版本：v-local' "$ROOT/update-latest-skip.out"
 ! grep -q '下载 Go core' "$ROOT/update-latest-skip.out"
 grep -q '已是最新版本：v-local' "$ROOT/update-menu-skip.out"
+grep -q '当前机器上的 RelayPilot 脚本 + Go core' "$ROOT/update-menu-skip.out"
 ! grep -q '已更新，正在重新打开新版面板' "$ROOT/update-menu-skip.out"
 grep -q '下载 Go core' "$ROOT/update-force.out"
+grep -q '拒绝安装版本不一致的更新' "$ROOT/update-mismatch.err"
 [[ -x "$ROOT/update-dir/relaypilot.sh" ]]
 [[ -x "$ROOT/update-dir/bin/relaypilot" ]]
 [[ -L "$ROOT/bin/relaypilot-updated" || -x "$ROOT/bin/relaypilot-updated" ]]
