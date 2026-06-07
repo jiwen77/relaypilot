@@ -62,6 +62,10 @@ const (
 	agentServiceRestartDelaySecs   = 12
 	defaultTaskLeaseTimeoutSeconds = 120
 	defaultTaskMaxLeaseCount       = 3
+	defaultTaskRetentionSeconds    = 7 * 86400
+	defaultMaxCompletedHubTasks    = 500
+	defaultTaskPruneIntervalSecs   = 3600
+	maxStoredTaskStringBytes       = 32 << 10
 	defaultMeshConfigDir           = "/etc/wireguard"
 	defaultMeshKeepaliveSeconds    = 25
 	defaultSyncStaleSeconds        = 21600
@@ -416,6 +420,22 @@ func run(args []string) error {
 			return err
 		}
 		return printJSON(endpoint)
+	case "agent-connection-info":
+		fs := flag.NewFlagSet(args[0], flag.ExitOnError)
+		stateDir := fs.String("state-dir", defaultStateDir, "state directory")
+		conf := fs.String("conf", defaultConfDir, "sing-box config file or directory")
+		authUser := fs.String("auth-user", "", "filter Reality client by auth_user")
+		asJSON := fs.Bool("json", false, "print JSON")
+		_ = fs.Parse(args[1:])
+		info, err := agentConnectionInfo(*stateDir, *conf, *authUser)
+		if err != nil {
+			return err
+		}
+		if *asJSON {
+			return printJSON(info)
+		}
+		fmt.Println(formatAgentConnectionInfoText(info))
+		return nil
 	case "bind-transit":
 		fs := flag.NewFlagSet(args[0], flag.ExitOnError)
 		conf := fs.String("conf", defaultConfDir, "sing-box config file or directory")

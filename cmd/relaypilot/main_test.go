@@ -2957,6 +2957,106 @@ func TestRecoverStaleHubTasksRequeuesThenFails(t *testing.T) {
 	}
 }
 
+func writeHubTaskForTest(t *testing.T, state, id, status string, createdAt, completedAt int64) {
+	t.Helper()
+	task := obj{
+		"kind":       hubTaskKind,
+		"version":    version,
+		"id":         id,
+		"agent_id":   "transit-hk",
+		"agent_role": "transit",
+		"command":    "status",
+		"status":     status,
+		"created_at": createdAt,
+	}
+	switch status {
+	case "done", "failed":
+		task["completed_at"] = completedAt
+	case "cancelled":
+		task["cancelled_at"] = completedAt
+	}
+	if err := writeJSON(filepath.Join(hubTasksDir(state), id+".json"), task, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertTaskFileExists(t *testing.T, state, id string, want bool) {
+	t.Helper()
+	_, err := os.Stat(filepath.Join(hubTasksDir(state), id+".json"))
+	if want && err != nil {
+		t.Fatalf("expected task %s to exist: %v", id, err)
+	}
+	if !want && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected task %s to be pruned, err=%v", id, err)
+	}
+}
+
+func TestPruneHubTasksBoundsCompletedHistoryAndKeepsActive(t *testing.T) {
+	root := t.TempDir()
+	state := filepath.Join(root, "hub")
+	nowTs := now()
+	writeHubTaskForTest(t, state, "old-done", "done", nowTs-20, nowTs-20)
+	writeHubTaskForTest(t, state, "recent-done", "done", nowTs-10, nowTs-10)
+	writeHubTaskForTest(t, state, "recent-failed", "failed", nowTs-9, nowTs-9)
+	writeHubTaskForTest(t, state, "recent-cancelled", "cancelled", nowTs-8, nowTs-8)
+	writeHubTaskForTest(t, state, "old-queued", "queued", nowTs-1000, 0)
+	writeHubTaskForTest(t, state, "old-running", "running", nowTs-1000, 0)
+
+	pruned, err := pruneHubTasks(state, 15, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if int64Value(pruned["deleted"]) != 2 || int64Value(pruned["kept_completed"]) != 2 {
+		t.Fatalf("prune summary = %#v", pruned)
+	}
+	assertTaskFileExists(t, state, "old-done", false)
+	assertTaskFileExists(t, state, "recent-done", false)
+	assertTaskFileExists(t, state, "recent-failed", true)
+	assertTaskFileExists(t, state, "recent-cancelled", true)
+	assertTaskFileExists(t, state, "old-queued", true)
+	assertTaskFileExists(t, state, "old-running", true)
+}
+
+func TestLeaseHubAgentTasksPrunesOldCompletedHistoryWithoutDroppingQueuedWork(t *testing.T) {
+	root := t.TempDir()
+	state := filepath.Join(root, "hub")
+	nowTs := now()
+	writeHubTaskForTest(t, state, "old-done", "done", nowTs-defaultTaskRetentionSeconds-10, nowTs-defaultTaskRetentionSeconds-10)
+	writeHubTaskForTest(t, state, "queued-work", "queued", nowTs, 0)
+
+	leased, err := leaseHubAgentTasks(state, "transit-hk", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(leased) != 1 || str(leased[0]["id"]) != "queued-work" || str(leased[0]["status"]) != "running" {
+		t.Fatalf("leased = %#v", leased)
+	}
+	assertTaskFileExists(t, state, "old-done", false)
+	assertTaskFileExists(t, state, "queued-work", true)
+}
+
+func TestCompleteHubTaskTruncatesLargeStoredResult(t *testing.T) {
+	root := t.TempDir()
+	state := filepath.Join(root, "hub")
+	agent := obj{"kind": agentRegistrationKind, "version": version, "id": "transit-hk", "role": "transit"}
+	task, err := createHubTask(state, agent, "status", nil, "batch-a", "/status transit-hk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	largeText := strings.Repeat("x", maxStoredTaskStringBytes+1024)
+	if _, err := completeHubTask(state, str(task["id"]), "transit-hk", obj{"success": true, "command": "status", "text": largeText}); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := loadJSON(filepath.Join(hubTasksDir(state), str(task["id"])+".json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := str(asObj(stored["result"])["text"])
+	if len(text) > maxStoredTaskStringBytes+128 || !strings.Contains(text, "truncated") {
+		t.Fatalf("stored result was not bounded: len=%d text suffix=%q", len(text), text[len(text)-minInt(len(text), 80):])
+	}
+}
+
 func TestGoOfflineAlertCallbackRemoveAndObserve(t *testing.T) {
 	root := t.TempDir()
 	state := filepath.Join(root, "hub")
@@ -3432,6 +3532,45 @@ func TestRenderLandingImportAndBindTransit(t *testing.T) {
 	}
 	if str(asObj(rules[1])["outbound"]) != "direct" {
 		t.Fatalf("unknown rule not preserved: %#v", rules)
+	}
+}
+
+func TestBindTransitRenamesUserByUUID(t *testing.T) {
+	root := t.TempDir()
+	fixedPassword := "YWFhYWFhYWFhYWFhYWFhYQ=="
+	endpoint, _, err := renderLandingSS("hk", "203.0.113.10", "::", 2443, 443, "2022-blake3-aes-128-gcm", fixedPassword, "tcp,udp", "ss-in", "landing-hk-ss")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conf := filepath.Join(root, "conf")
+	clientUUID := "22222222-2222-4222-8222-222222222222"
+	if err := writeJSON(filepath.Join(conf, "00-inbounds.json"), obj{"inbounds": []any{obj{"type": "vless", "tag": "vless-in", "users": []any{obj{"name": "old-hk", "uuid": clientUUID, "flow": "xtls-rprx-vision"}}}}}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSON(filepath.Join(conf, "01-outbounds.json"), obj{"outbounds": []any{obj{"type": "direct", "tag": "direct"}}}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSON(filepath.Join(conf, "02-route.json"), obj{"route": obj{"rules": []any{obj{"inbound": []any{"vless-in"}, "auth_user": []any{"old-hk"}, "outbound": "landing-hk-ss", "action": "route"}}, "final": "direct"}}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bindTransit(conf, endpoint, "vless-in", "new-hk", clientUUID, "xtls-rprx-vision", true, filepath.Join(root, "state"), true); err != nil {
+		t.Fatal(err)
+	}
+	inbounds, _ := loadJSON(filepath.Join(conf, "00-inbounds.json"))
+	users := asList(asObj(asList(inbounds["inbounds"])[0])["users"])
+	if len(users) != 1 || str(asObj(users[0])["name"]) != "new-hk" || str(asObj(users[0])["uuid"]) != clientUUID {
+		t.Fatalf("user should be renamed in place: %#v", users)
+	}
+	routeFile, _ := loadJSON(filepath.Join(conf, "02-route.json"))
+	rules := asList(asObj(routeFile["route"])["rules"])
+	for _, raw := range rules {
+		if listContains(asObj(raw)["auth_user"], "old-hk") {
+			t.Fatalf("old auth_user route should be removed: %#v", rules)
+		}
+	}
+	first := asObj(rules[0])
+	if !listContains(first["auth_user"], "new-hk") || first["outbound"] != "landing-hk-ss" {
+		t.Fatalf("first rule = %#v", first)
 	}
 }
 

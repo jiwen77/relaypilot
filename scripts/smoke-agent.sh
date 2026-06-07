@@ -7,6 +7,27 @@ cleanup() { rm -rf "$ROOT"; }
 trap cleanup EXIT
 mkdir -p "$ROOT/bin" "$ROOT/state" "$ROOT/migrated-state" "$ROOT/transit-conf" "$ROOT/systemd"
 
+text_offset() {
+  local pattern="$1" file="$2"
+  grep -abo "$pattern" "$file" | head -n1 | cut -d: -f1
+}
+
+assert_text_before() {
+  local first="$1" second="$2" file="$3" first_offset second_offset
+  first_offset="$(text_offset "$first" "$file")"
+  second_offset="$(text_offset "$second" "$file")"
+  if [[ -z "$first_offset" || -z "$second_offset" || "$first_offset" -ge "$second_offset" ]]; then
+    echo "expected '$first' before '$second' in $file" >&2
+    cat "$file" >&2
+    exit 1
+  fi
+}
+
+json_string_field() {
+  local key="$1" file="$2"
+  grep -m1 "\"$key\"" "$file" | sed -E 's/^[^:]+:[[:space:]]*"([^"]*)".*$/\1/'
+}
+
 if ! command -v go >/dev/null 2>&1; then
   echo "go is required for smoke test" >&2
   exit 1
@@ -21,15 +42,75 @@ exit 0
 STUB
 chmod +x "$ROOT/bin/sing-box"
 
+cat > "$ROOT/bin/systemctl" <<'STUB'
+#!/usr/bin/env bash
+cmd="${1:-}"
+shift || true
+unit_is_listed() {
+  local needle="$1" unit
+  for unit in ${RELAYPILOT_STUB_SYSTEMCTL_UNITS:-}; do
+    [[ "$unit" == "$needle" ]] && return 0
+  done
+  return 1
+}
+unit_is_active() {
+  local needle="$1" unit
+  for unit in ${RELAYPILOT_STUB_SYSTEMCTL_ACTIVE_UNITS:-}; do
+    [[ "$unit" == "$needle" ]] && return 0
+  done
+  return 1
+}
+case "$cmd" in
+  list-unit-files)
+    pattern="${1:-}"
+    if unit_is_listed "$pattern"; then
+      printf '%s enabled\n' "$pattern"
+      exit 0
+    fi
+    exit 0
+    ;;
+  is-active)
+    unit="${1:-}"
+    if unit_is_active "$unit"; then
+      printf 'active\n'
+      exit 0
+    fi
+    printf 'inactive\n'
+    exit 3
+    ;;
+  is-enabled)
+    unit="${1:-}"
+    if unit_is_listed "$unit"; then
+      printf 'enabled\n'
+      exit 0
+    fi
+    printf 'disabled\n'
+    exit 1
+    ;;
+  status)
+    unit="${1:-}"
+    unit_is_active "$unit" && { printf '%s active\n' "$unit"; exit 0; }
+    printf '%s inactive\n' "$unit"
+    exit 3
+    ;;
+  daemon-reload|enable|restart|start|stop)
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+STUB
+chmod +x "$ROOT/bin/systemctl"
+
 cat > "$ROOT/landing.in" <<'EOF_INPUT'
 hk
-203.0.113.10
 ::
 2443
+1
+
+203.0.113.10
 443
-2022-blake3-aes-128-gcm
-ss-in
-landing-hk-ss
 EOF_INPUT
 
 RELAYPILOT_NO_ROOT=1 \
@@ -40,17 +121,32 @@ RELAYPILOT_STUB_LOG="$ROOT/stub.log" \
 STATE_DIR="$ROOT/state" \
 SINGBOX_CONFIG_PATH="$ROOT/config.json" \
 bash ./relaypilot.sh landing-install-ss < "$ROOT/landing.in" > "$ROOT/landing.out" 2> "$ROOT/landing.err"
+cp "$ROOT/config.json" "$ROOT/config.before.json"
+cp "$ROOT/state/endpoints/hk.json" "$ROOT/hk.endpoint.before.json"
+
+printf '\n\n\n\n\n\n\n' > "$ROOT/landing-update.in"
+
+RELAYPILOT_NO_ROOT=1 \
+SKIP_SINGBOX_INSTALL=1 \
+NO_RESTART=1 \
+PATH="$ROOT/bin:$PATH" \
+RELAYPILOT_STUB_LOG="$ROOT/stub.log" \
+STATE_DIR="$ROOT/state" \
+SINGBOX_CONFIG_PATH="$ROOT/config.json" \
+bash ./relaypilot.sh landing-install-ss < "$ROOT/landing-update.in" > "$ROOT/landing-update.out" 2> "$ROOT/landing-update.err"
+if ! cmp -s "$ROOT/config.before.json" "$ROOT/config.json" || ! cmp -s "$ROOT/hk.endpoint.before.json" "$ROOT/state/endpoints/hk.json" || [[ -e "$ROOT/state/endpoints/landing.json" ]]; then
+  echo "Shadowsocks update should reuse existing defaults when accepted" >&2
+  exit 1
+fi
 
 cat > "$ROOT/landing-socks.in" <<'EOF_INPUT'
 la-direct
-198.51.100.20
 ::
 1080
-2080
 sub2api
 secret-pass
-socks-in
-landing-la-direct-socks
+198.51.100.20
+2080
 EOF_INPUT
 
 RELAYPILOT_NO_ROOT=1 \
@@ -61,16 +157,33 @@ RELAYPILOT_STUB_LOG="$ROOT/stub.log" \
 STATE_DIR="$ROOT/socks-state" \
 SINGBOX_CONFIG_PATH="$ROOT/socks-config.json" \
 bash ./relaypilot.sh landing-install-socks < "$ROOT/landing-socks.in" > "$ROOT/landing-socks.out" 2> "$ROOT/landing-socks.err"
+cp "$ROOT/socks-config.json" "$ROOT/socks-config.before.json"
+cp "$ROOT/socks-state/endpoints/la-direct.json" "$ROOT/la-direct.endpoint.before.json"
 
+printf '\n\n\n\n\n\n\n' > "$ROOT/landing-socks-update.in"
+
+RELAYPILOT_NO_ROOT=1 \
+SKIP_SINGBOX_INSTALL=1 \
+NO_RESTART=1 \
+PATH="$ROOT/bin:$PATH" \
+RELAYPILOT_STUB_LOG="$ROOT/stub.log" \
+STATE_DIR="$ROOT/socks-state" \
+SINGBOX_CONFIG_PATH="$ROOT/socks-config.json" \
+bash ./relaypilot.sh landing-install-socks < "$ROOT/landing-socks-update.in" > "$ROOT/landing-socks-update.out" 2> "$ROOT/landing-socks-update.err"
+if ! cmp -s "$ROOT/socks-config.before.json" "$ROOT/socks-config.json" || ! cmp -s "$ROOT/la-direct.endpoint.before.json" "$ROOT/socks-state/endpoints/la-direct.json" || [[ -e "$ROOT/socks-state/endpoints/landing-direct.json" ]]; then
+  echo "SOCKS update should reuse existing defaults when accepted" >&2
+  exit 1
+fi
+
+TRANSIT_PRIVATE_KEY_SMOKE="uBQcxiMI5t1rHtw2iWO2ldhclClTHFWb0ppUIK0vce8"
 cat > "$ROOT/transit-init.in" <<EOF_INPUT
-$ROOT/transit-conf
-::
+0.0.0.0
+8443
+www.example.com
+
+
+203.0.113.30
 443
-vless-in
-www.cloudflare.com
-www.cloudflare.com
-443
-0123456789abcdef
 EOF_INPUT
 
 RELAYPILOT_NO_ROOT=1 \
@@ -80,12 +193,26 @@ PATH="$ROOT/bin:$PATH" \
 RELAYPILOT_STUB_LOG="$ROOT/stub.log" \
 STATE_DIR="$ROOT/state" \
 CONF_DIR="$ROOT/transit-conf" \
+TRANSIT_PRIVATE_KEY="$TRANSIT_PRIVATE_KEY_SMOKE" \
+TRANSIT_SHORT_ID=0123456789abcdef \
 bash ./relaypilot.sh transit-init-reality < "$ROOT/transit-init.in" > "$ROOT/transit-init.out" 2> "$ROOT/transit-init.err"
+cp "$ROOT/transit-conf/00-relaypilot-reality.json" "$ROOT/reality.before.json"
+printf '\n\n\n\n\n\n\n' > "$ROOT/transit-init-update.in"
+RELAYPILOT_NO_ROOT=1 \
+SKIP_SINGBOX_INSTALL=1 \
+NO_RESTART=1 \
+PATH="$ROOT/bin:$PATH" \
+RELAYPILOT_STUB_LOG="$ROOT/stub.log" \
+STATE_DIR="$ROOT/state" \
+CONF_DIR="$ROOT/transit-conf" \
+bash ./relaypilot.sh transit-init-reality < "$ROOT/transit-init-update.in" > "$ROOT/transit-init-update.out" 2> "$ROOT/transit-init-update.err"
+if ! cmp -s "$ROOT/reality.before.json" "$ROOT/transit-conf/00-relaypilot-reality.json"; then
+  echo "Reality update should reuse existing defaults when accepted" >&2
+  exit 1
+fi
 
 cat > "$ROOT/transit.in" <<EOF_INPUT
 $ROOT/state/endpoints/hk.json
-$ROOT/transit-conf
-vless-in
 hk
 44444444-4444-4444-8444-444444444444
 EOF_INPUT
@@ -97,6 +224,20 @@ RELAYPILOT_STUB_LOG="$ROOT/stub.log" \
 STATE_DIR="$ROOT/state" \
 CONF_DIR="$ROOT/transit-conf" \
 bash ./relaypilot.sh transit-import-bind < "$ROOT/transit.in" > "$ROOT/transit.out" 2> "$ROOT/transit.err"
+cp "$ROOT/transit-conf/00-relaypilot-reality.json" "$ROOT/reality.bound.before.json"
+cp "$ROOT/transit-conf/91-relaypilot-route.json" "$ROOT/route.bound.before.json"
+printf '\n\n\n' > "$ROOT/transit-update.in"
+RELAYPILOT_NO_ROOT=1 \
+NO_RESTART=1 \
+PATH="$ROOT/bin:$PATH" \
+RELAYPILOT_STUB_LOG="$ROOT/stub.log" \
+STATE_DIR="$ROOT/state" \
+CONF_DIR="$ROOT/transit-conf" \
+bash ./relaypilot.sh transit-import-bind < "$ROOT/transit-update.in" > "$ROOT/transit-update.out" 2> "$ROOT/transit-update.err"
+if ! cmp -s "$ROOT/reality.bound.before.json" "$ROOT/transit-conf/00-relaypilot-reality.json" || ! cmp -s "$ROOT/route.bound.before.json" "$ROOT/transit-conf/91-relaypilot-route.json"; then
+  echo "Transit bind update should reuse existing endpoint/client defaults when accepted" >&2
+  exit 1
+fi
 
 STATE_DIR="$ROOT/state" bash ./relaypilot.sh tg-config \
   --bot-token "123456:SMOKE_TOKEN" \
@@ -139,29 +280,48 @@ STATE_DIR="$ROOT/state" bash ./relaypilot.sh public-entry-set \
   --local-port 50123 \
   --network udp > "$ROOT/public-entry-wg.out"
 STATE_DIR="$ROOT/state" bash ./relaypilot.sh public-entry-list > "$ROOT/public-entry-list.out"
+STATE_DIR="$ROOT/state" CONF_DIR="$ROOT/transit-conf" bash ./relaypilot.sh connection-info > "$ROOT/connection-info.out"
+STATE_DIR="$ROOT/socks-state" SINGBOX_CONFIG_PATH="$ROOT/socks-config.json" bash ./relaypilot.sh connection-info "$ROOT/socks-config.json" > "$ROOT/socks-connection-info.out"
 
+printf '0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
+  bash ./relaypilot.sh > "$ROOT/install-menu.out"
+printf '0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
+  bash ./relaypilot.sh agent > "$ROOT/agent-menu.out"
 printf '2\n0\n0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
-  bash ./relaypilot.sh > "$ROOT/agent-menu.out"
-printf '1\n0\n0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
-  bash ./relaypilot.sh > "$ROOT/hub-menu.out"
+  bash ./relaypilot.sh agent > "$ROOT/agent-proxy-config-menu.out"
+printf '0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
+  bash ./relaypilot.sh hub > "$ROOT/hub-menu.out"
+printf '0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
+  bash ./relaypilot.sh services > "$ROOT/service-menu.out"
+printf '2\n0\n0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
+  bash ./relaypilot.sh services > "$ROOT/hub-service-menu.out"
 printf '3\n0\n0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
-  bash ./relaypilot.sh > "$ROOT/service-menu.out"
-printf '3\n2\n0\n0\n0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
-  bash ./relaypilot.sh > "$ROOT/hub-service-menu.out"
-printf '4\n0\n0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
   bash ./relaypilot.sh > "$ROOT/uninstall-menu.out"
 printf '0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
   bash ./relaypilot.sh agent > "$ROOT/agent-direct-menu.out"
-printf '2\n0\n0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/ip-state" \
-  bash ./relaypilot.sh > "$ROOT/agent-menu-connected.out"
-printf '2\n6\n0\n0\n0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/ip-state" \
-  bash ./relaypilot.sh > "$ROOT/agent-advanced-menu.out"
+printf '0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/ip-state" \
+  bash ./relaypilot.sh agent > "$ROOT/agent-menu-connected.out"
+printf '3\n0\n0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/ip-state" \
+  bash ./relaypilot.sh agent > "$ROOT/agent-network-menu.out"
+printf '4\n0\n0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/ip-state" \
+  bash ./relaypilot.sh agent > "$ROOT/agent-service-missing-menu.out"
+printf '5\n1\n0\n0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/ip-state" \
+  bash ./relaypilot.sh agent > "$ROOT/agent-advanced-menu.out"
 printf '0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/ip-state" \
   bash ./relaypilot.sh agent > "$ROOT/agent-direct-connected.out"
+printf '0\n' | RELAYPILOT_NO_ROOT=1 \
+  PATH="$ROOT/bin:$PATH" \
+  RELAYPILOT_STUB_SYSTEMCTL_UNITS="sing-box.service" \
+  RELAYPILOT_STUB_SYSTEMCTL_ACTIVE_UNITS="sing-box.service sing-box" \
+  STATE_DIR="$ROOT/socks-state" \
+  SINGBOX_CONFIG_PATH="$ROOT/socks-config.json" \
+  bash ./relaypilot.sh agent > "$ROOT/agent-standalone-proxy-menu.out"
 printf '0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
   bash ./relaypilot.sh landing > "$ROOT/landing-menu.out"
 printf '0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
   bash ./relaypilot.sh transit > "$ROOT/transit-menu.out"
+printf '2\nhk-entry\nfront.example\n443\n2443\n0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
+  bash ./relaypilot.sh public-entry > "$ROOT/public-entry-wizard.out"
 
 STATE_DIR="$ROOT/state" bash ./relaypilot.sh hub-init-tls --host hub.example > "$ROOT/hub-tls.out"
 printf '2\nsmoke-interactive\n10\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/state" \
@@ -197,8 +357,24 @@ RELAYPILOT_NO_ROOT=1 \
 HUB_PUBLIC_HOST="https://hub.quick.example:9443" \
 RELAYPILOT_PROFILE=tiny \
 bash ./relaypilot.sh hub-quick-setup > "$ROOT/hub-quick.out" 2> "$ROOT/hub-quick.err"
+STATE_DIR="$ROOT/state" CONF_DIR="$ROOT/transit-conf" bash ./relaypilot.sh hub-agent-export \
+  --agent-id transit-hk \
+  --role transit \
+  --name "HK Transit" \
+  --conf "$ROOT/transit-conf" \
+  --output "$ROOT/quick-transit.registration.json" > "$ROOT/quick-transit-export.out"
+STATE_DIR="$ROOT/state" bash ./relaypilot.sh hub-agent-export \
+  --agent-id landing-hk \
+  --role landing \
+  --name "HK Landing" \
+  --conf "$ROOT/config.json" \
+  --output "$ROOT/quick-landing.registration.json" > "$ROOT/quick-landing-export.out"
+STATE_DIR="$ROOT/quick-hub" bash ./relaypilot.sh hub-import-agent "$ROOT/quick-transit.registration.json" > "$ROOT/quick-transit-import.out"
+STATE_DIR="$ROOT/quick-hub" bash ./relaypilot.sh hub-import-agent "$ROOT/quick-landing.registration.json" > "$ROOT/quick-landing-import.out"
 printf '1\n0\n0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/quick-hub" \
   bash ./relaypilot.sh > "$ROOT/hub-menu-ready.out"
+printf '2\n1\n1\n1\n\n\n0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/quick-hub" \
+  bash ./relaypilot.sh hub > "$ROOT/hub-link-wizard.out"
 printf '1\n4\n0\n0\n0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/quick-hub" \
   bash ./relaypilot.sh > "$ROOT/hub-agents-menu.out"
 printf '1\n8\n0\n0\n0\n' | RELAYPILOT_NO_ROOT=1 STATE_DIR="$ROOT/quick-hub" \
@@ -306,27 +482,52 @@ grep -q 'dry_run' "$ROOT/tg-send.out"
 ! grep -q 'SMOKE_TOKEN' "$ROOT/tg-send.out"
 grep -q 'landing-hk-ss' "$ROOT/tg-dispatch.out"
 
-grep -q 'RelayPilot v.* · 当前：未配置' "$ROOT/agent-menu.out"
+grep -q 'RelayPilot 安装 v.* · 当前：未配置' "$ROOT/install-menu.out"
+grep -q '安装/进入 Hub' "$ROOT/install-menu.out"
+grep -q '安装/进入 Agent' "$ROOT/install-menu.out"
+grep -q '卸载 RelayPilot' "$ROOT/install-menu.out"
+if grep -q '本机服务' "$ROOT/install-menu.out"; then
+  echo "relaypilot install menu should not expose service management" >&2
+  exit 1
+fi
+if grep -q '^ *[0-9]) Hub 模式\|^ *[0-9]) Agent 模式' "$ROOT/install-menu.out"; then
+  echo "relaypilot default menu should be install-focused, not role mode navigation" >&2
+  exit 1
+fi
+grep -q 'Agent 模式 v.* · 当前：未配置' "$ROOT/agent-menu.out"
 grep -q 'Hub：○ 未启用.*Agent：○ 未启用.*代理：○ 未启用' "$ROOT/agent-menu.out"
-grep -q 'Hub 模式' "$ROOT/agent-menu.out"
-grep -q 'Agent 模式' "$ROOT/agent-menu.out"
-grep -q '卸载 RelayPilot' "$ROOT/agent-menu.out"
 grep -q '卸载 RelayPilot（保留状态/代理）' "$ROOT/uninstall-menu.out"
 grep -q '彻底卸载（含状态/代理）' "$ROOT/uninstall-menu.out"
 grep -q 'Agent 尚未接入 Hub' "$ROOT/agent-menu.out"
 grep -q '接入 Hub' "$ROOT/agent-menu.out"
-grep -q '配置中转 Reality' "$ROOT/agent-menu.out"
-grep -q '配置落地出口' "$ROOT/agent-menu.out"
-if grep -q '接入信息' "$ROOT/agent-menu.out" || grep -q '退出 Hub 托管' "$ROOT/agent-menu.out" || grep -q '重置 Agent' "$ROOT/agent-menu.out"; then
+grep -q '代理配置' "$ROOT/agent-menu.out"
+grep -q '连接信息' "$ROOT/agent-menu.out"
+if grep -q '接入信息\|退出 Hub 托管\|重置 Agent\|配置中转 Reality\|配置落地出口' "$ROOT/agent-menu.out"; then
   echo "unenrolled Agent mode should hide connected-only and destructive actions" >&2
   exit 1
 fi
+grep -q '代理配置' "$ROOT/agent-proxy-config-menu.out"
+grep -q '配置中转 Reality' "$ROOT/agent-proxy-config-menu.out"
+grep -q '配置落地出口' "$ROOT/agent-proxy-config-menu.out"
 grep -q 'Agent 已接入：transit-hk · 中转' "$ROOT/agent-menu-connected.out"
-grep -q '中转节点' "$ROOT/agent-menu-connected.out"
-grep -q '接入信息' "$ROOT/agent-menu-connected.out"
-grep -q 'IP 模式' "$ROOT/agent-menu-connected.out"
-grep -q '公网入口' "$ROOT/agent-menu-connected.out"
+grep -q 'Agent：○ 已接入/服务未安装' "$ROOT/agent-menu-connected.out"
+grep -q '代理配置' "$ROOT/agent-menu-connected.out"
+grep -q '网络设置' "$ROOT/agent-menu-connected.out"
+grep -q '连接信息' "$ROOT/agent-menu-connected.out"
 grep -q '高级操作' "$ROOT/agent-menu-connected.out"
+if grep -q 'Hub 接入信息\|IP 模式\|公网入口' "$ROOT/agent-menu-connected.out"; then
+  echo "Hub enrollment and detailed network settings should not live in the Agent main menu" >&2
+  exit 1
+fi
+grep -q 'Agent 网络设置' "$ROOT/agent-network-menu.out"
+grep -q 'IP 模式' "$ROOT/agent-network-menu.out"
+grep -q '公网入口' "$ROOT/agent-network-menu.out"
+grep -q 'Agent 已接入 Hub，但后台服务未安装' "$ROOT/agent-service-missing-menu.out"
+grep -q '安装/修复 Agent 服务' "$ROOT/agent-service-missing-menu.out"
+if grep -q 'Agent：○ 未安装' "$ROOT/agent-menu-connected.out" "$ROOT/agent-direct-connected.out" "$ROOT/agent-service-missing-menu.out"; then
+  echo "enrolled Agent should not be summarized as simply 未安装" >&2
+  exit 1
+fi
 if grep -q '退出 Hub 托管' "$ROOT/agent-menu-connected.out" || grep -q '重置 Agent' "$ROOT/agent-menu-connected.out"; then
   echo "connected Agent mode should keep destructive actions under Advanced" >&2
   exit 1
@@ -341,8 +542,63 @@ grep -q '"ip_mode": "dynamic"' "$ROOT/ip-state/agent-enrollment.json"
 grep -q '"public_ip_interval_seconds": 1800' "$ROOT/ip-state/agent-enrollment.json"
 grep -q '"host": "front.example"' "$ROOT/state/public-entries.json"
 grep -q '"public_port": 51820' "$ROOT/state/public-entries.json"
+grep -q '"host": "203.0.113.30"' "$ROOT/state/public-entries.json"
+grep -q '"public_port": 443' "$ROOT/state/public-entries.json"
+grep -q '"local_port": 8443' "$ROOT/state/public-entries.json"
+grep -q 'reality.*vless-in.*203.0.113.30:443' "$ROOT/public-entry-list.out"
 grep -q 'shadowsocks.*hk.*front.example:443' "$ROOT/public-entry-list.out"
 grep -q 'wireguard.*hk.*front.example:51820' "$ROOT/public-entry-list.out"
+grep -q 'Reality / VLESS' "$ROOT/connection-info.out"
+grep -q '^==================== Reality / VLESS ====================$' "$ROOT/connection-info.out"
+grep -q '客户端：hk' "$ROOT/connection-info.out"
+grep -q '地址：203.0.113.30:443' "$ROOT/connection-info.out"
+grep -q 'UUID：44444444-4444-4444-8444-444444444444' "$ROOT/connection-info.out"
+grep -q 'SNI：www.example.com' "$ROOT/connection-info.out"
+grep -q 'Public Key：' "$ROOT/connection-info.out"
+grep -q 'Short ID：0123456789abcdef' "$ROOT/connection-info.out"
+grep -q '^==================== VLESS 分享链接 ====================$' "$ROOT/connection-info.out"
+grep -q 'VLESS 分享链接' "$ROOT/connection-info.out"
+grep -q '^客户端：hk$' "$ROOT/connection-info.out"
+grep -q '^vless://44444444-4444-4444-8444-444444444444@203.0.113.30:443?' "$ROOT/connection-info.out"
+if grep -q 'VLESS 链接：' "$ROOT/connection-info.out"; then
+  echo "VLESS URI should live in a separate share-link block, not inline with parameters" >&2
+  exit 1
+fi
+grep -q 'security=reality' "$ROOT/connection-info.out"
+grep -q 'pbk=' "$ROOT/connection-info.out"
+grep -q 'sid=0123456789abcdef' "$ROOT/connection-info.out"
+grep -q 'sni=www.example.com' "$ROOT/connection-info.out"
+grep -q '^==================== sing-box 出站 JSON ====================$' "$ROOT/connection-info.out"
+grep -q '"type": "vless"' "$ROOT/connection-info.out"
+grep -q '"server": "203.0.113.30"' "$ROOT/connection-info.out"
+grep -q '"uuid": "44444444-4444-4444-8444-444444444444"' "$ROOT/connection-info.out"
+grep -q '"reality": {' "$ROOT/connection-info.out"
+grep -q '"short_id": "0123456789abcdef"' "$ROOT/connection-info.out"
+grep -q '^==================== mihomo proxies YAML ====================$' "$ROOT/connection-info.out"
+grep -q '^proxies:$' "$ROOT/connection-info.out"
+grep -q 'name: "hk-vless"' "$ROOT/connection-info.out"
+grep -q 'type: vless' "$ROOT/connection-info.out"
+grep -q 'servername: "www.example.com"' "$ROOT/connection-info.out"
+grep -q 'client-fingerprint: chrome' "$ROOT/connection-info.out"
+grep -q 'reality-opts:' "$ROOT/connection-info.out"
+grep -q 'public-key: "' "$ROOT/connection-info.out"
+grep -q 'short-id: "0123456789abcdef"' "$ROOT/connection-info.out"
+grep -q 'encryption: ""' "$ROOT/connection-info.out"
+grep -q 'name: "hk-ss"' "$ROOT/connection-info.out"
+grep -q 'type: ss' "$ROOT/connection-info.out"
+grep -q 'cipher: "2022-blake3-aes-128-gcm"' "$ROOT/connection-info.out"
+grep -q '^==================== 落地出口 ====================$' "$ROOT/connection-info.out"
+grep -q 'Shadowsocks' "$ROOT/connection-info.out"
+grep -q '密码：' "$ROOT/connection-info.out"
+grep -q 'SOCKS5' "$ROOT/socks-connection-info.out"
+grep -q '地址：198.51.100.20:2080' "$ROOT/socks-connection-info.out"
+grep -q '用户名：sub2api' "$ROOT/socks-connection-info.out"
+grep -q '密码：secret-pass' "$ROOT/socks-connection-info.out"
+grep -q '^==================== mihomo proxies YAML ====================$' "$ROOT/socks-connection-info.out"
+grep -q 'name: "la-direct-socks"' "$ROOT/socks-connection-info.out"
+grep -q 'type: socks5' "$ROOT/socks-connection-info.out"
+grep -q 'username: "sub2api"' "$ROOT/socks-connection-info.out"
+grep -q 'password: "secret-pass"' "$ROOT/socks-connection-info.out"
 grep -q 'Hub 模式' "$ROOT/hub-menu-ready.out"
 grep -q '生成邀请码' "$ROOT/hub-menu-ready.out"
 grep -q '串联节点' "$ROOT/hub-menu-ready.out"
@@ -367,6 +623,14 @@ if grep -q '安装服务' "$ROOT/hub-telegram-menu.out" || grep -q '注册命令
   exit 1
 fi
 grep -q 'Agent 高级操作' "$ROOT/agent-advanced-menu.out"
+grep -q 'Hub 接入信息' "$ROOT/agent-advanced-menu.out"
+grep -q 'Hub：https://hub.example:8443' "$ROOT/agent-advanced-menu.out"
+grep -q 'Agent ID：transit-hk' "$ROOT/agent-advanced-menu.out"
+grep -q '角色：中转' "$ROOT/agent-advanced-menu.out"
+if grep -q '"hub_url"\|"agent_id"\|"token_file"' "$ROOT/agent-advanced-menu.out"; then
+  echo "Hub enrollment info should be a readable summary, not raw JSON" >&2
+  exit 1
+fi
 grep -q '远程退役授权' "$ROOT/agent-advanced-menu.out"
 grep -q '退出 Hub 托管' "$ROOT/agent-advanced-menu.out"
 grep -q '重置 Agent' "$ROOT/agent-advanced-menu.out"
@@ -385,11 +649,55 @@ if grep -q '清除失败状态' "$ROOT/hub-service-menu.out"; then
 fi
 grep -q 'Agent 模式' "$ROOT/agent-direct-menu.out"
 grep -q 'Agent 尚未接入 Hub' "$ROOT/agent-direct-menu.out"
-grep -q '配置中转 Reality' "$ROOT/agent-direct-menu.out"
+grep -q '代理配置' "$ROOT/agent-direct-menu.out"
+grep -q '接入 Hub' "$ROOT/agent-direct-menu.out"
 grep -q 'Agent 模式' "$ROOT/agent-direct-connected.out"
 grep -q 'Agent 已接入：transit-hk · 中转' "$ROOT/agent-direct-connected.out"
-grep -q '中转节点' "$ROOT/agent-direct-connected.out"
+grep -q '代理配置' "$ROOT/agent-direct-connected.out"
+grep -q 'Agent 模式 v.* · 当前：本机代理' "$ROOT/agent-standalone-proxy-menu.out"
+grep -q 'Hub：○ 未启用.*Agent：○ 未启用.*代理：● SOCKS5 运行中' "$ROOT/agent-standalone-proxy-menu.out"
+grep -q 'Agent 尚未接入 Hub' "$ROOT/agent-standalone-proxy-menu.out"
+grep -q '连接信息' "$ROOT/agent-standalone-proxy-menu.out"
 grep -q '安装/更新 SOCKS5' "$ROOT/landing-menu.out"
+grep -q '安装/更新 Shadowsocks' "$ROOT/landing-menu.out"
+if grep -q '本机直连\|中转出口\|接入 Hub 托管' "$ROOT/agent-menu.out" "$ROOT/agent-direct-menu.out" "$ROOT/landing-menu.out"; then
+  echo "menus should stay concise without explanatory suffixes" >&2
+  exit 1
+fi
+assert_text_before '本地地址/IP' '本地端口' "$ROOT/landing-socks.out"
+assert_text_before '本地端口' 'SOCKS 用户名' "$ROOT/landing-socks.out"
+assert_text_before 'SOCKS 密码' '访问地址/IP' "$ROOT/landing-socks.out"
+assert_text_before 'Shadowsocks 加密方式' 'Shadowsocks 密码' "$ROOT/landing.out"
+assert_text_before 'Shadowsocks 密码' '访问地址/IP' "$ROOT/landing.out"
+if grep -q 'inbound tag\|endpoint tag' "$ROOT/landing-socks.out" "$ROOT/landing.out"; then
+  echo "normal landing install wizards should not ask for sing-box tag internals" >&2
+  exit 1
+fi
+assert_text_before '本地地址/IP' '本地端口' "$ROOT/transit-init.out"
+assert_text_before '本地端口' '伪装域名/SNI' "$ROOT/transit-init.out"
+assert_text_before '伪装域名/SNI' 'Reality 私钥' "$ROOT/transit-init.out"
+assert_text_before 'Reality 私钥' 'Reality short_id' "$ROOT/transit-init.out"
+assert_text_before 'Reality short_id' '访问地址/IP' "$ROOT/transit-init.out"
+assert_text_before '访问地址/IP' '访问端口' "$ROOT/transit-init.out"
+if grep -q 'sing-box 配置目录\|Reality inbound tag\|VLESS Reality inbound tag\|Reality 握手目标\|Reality 握手端口\|Transit agent\|auth_user\|server_name' "$ROOT/transit-init.out" "$ROOT/transit.out"; then
+  echo "normal transit wizards should not ask for sing-box path/tag/handshake internals" >&2
+  exit 1
+fi
+assert_text_before '落地出口 JSON 文件路径' '客户端名称' "$ROOT/transit.out"
+assert_text_before '客户端名称' '客户端 UUID' "$ROOT/transit.out"
+assert_text_before '对外 IP/域名' '对外端口' "$ROOT/public-entry-wizard.out"
+assert_text_before '对外端口' '本地端口' "$ROOT/public-entry-wizard.out"
+if grep -q '本机监听端口' "$ROOT/public-entry-wizard.out"; then
+  echo "public entry wizard should use 本地端口 consistently" >&2
+  exit 1
+fi
+assert_text_before '选择中转节点' '选择落地节点' "$ROOT/hub-link-wizard.out"
+assert_text_before '链路模式' '客户端名称' "$ROOT/hub-link-wizard.out"
+assert_text_before '客户端名称' '出口名称' "$ROOT/hub-link-wizard.out"
+if grep -q 'auth_user\|endpoint 名\|inbound tag\|endpoint tag\|Reality inbound tag' "$ROOT/hub-link-wizard.out"; then
+  echo "Hub link wizard should hide auth_user/endpoint/tag internals" >&2
+  exit 1
+fi
 grep -q '运行状态' "$ROOT/landing-menu.out"
 if grep -q 'Endpoints' "$ROOT/landing-menu.out"; then
   echo "landing menu should not expose debug-only Endpoints entry" >&2
@@ -437,9 +745,16 @@ grep -q '未写入任何 Hub 配置' "$ROOT/hub-quick-cancel.out"
 [[ ! -e "$ROOT/quick-hub-cancel/hub-tls/ca.crt" ]]
 grep -q 'Hub 配置预览' "$ROOT/hub-quick.out"
 grep -q 'Hub URL 给 agent 使用：https://hub.quick.example:9443' "$ROOT/hub-quick.out"
+grep -q 'Hub 访问地址/IP' "$ROOT/hub-quick.out"
+grep -q 'Hub 访问端口' "$ROOT/hub-quick.out"
+grep -q 'Hub 本地地址/IP' "$ROOT/hub-quick.out"
 grep -q '证书 SAN 包含：hub.quick.example' "$ROOT/hub-quick.out"
 grep -q '是否现在启动 relaypilot-hub \[Y/n\]' "$ROOT/hub-quick.out"
 grep -q '绑定 Telegram 并启用面板 \[y/N\]' "$ROOT/hub-quick.out"
+if grep -q 'Hub public IP/domain\|Hub HTTPS port\|Hub listen address' "$ROOT/hub-quick.out" "$ROOT/hub-quick-cancel.out"; then
+  echo "Hub setup wizard should use concise Chinese labels" >&2
+  exit 1
+fi
 grep -q 'Hub URL： https://hub.quick.example:9443' "$ROOT/hub-enroll-stored-default.out"
 grep -q '默认：' "$ROOT/hub-enroll-stored-default.out"
 grep -q 'Hub：https://hub.quick.example:9443' "$ROOT/hub-enroll-stored-default.out"
@@ -514,13 +829,13 @@ INSTALL_DIR="$ROOT/update-dir" \
 BIN_PATH="$ROOT/bin/relaypilot-updated" \
 RELAYPILOT_NO_ROOT=1 \
 bash ./relaypilot.sh update --no-restart-services > "$ROOT/update-latest-skip.out" 2> "$ROOT/update-latest-skip.err"
-printf '3\n6\n0\n0\n' | RAW_BASE="file://$ROOT/raw" \
+printf '6\n0\n' | RAW_BASE="file://$ROOT/raw" \
 RELEASE_BASE="file://$ROOT/release" \
 RELAYPILOT_REMOTE_VERSION="v-local" \
 INSTALL_DIR="$ROOT/update-dir" \
 BIN_PATH="$ROOT/bin/relaypilot-updated" \
 RELAYPILOT_NO_ROOT=1 \
-bash ./relaypilot.sh > "$ROOT/update-menu-skip.out" 2> "$ROOT/update-menu-skip.err"
+bash ./relaypilot.sh services > "$ROOT/update-menu-skip.out" 2> "$ROOT/update-menu-skip.err"
 RAW_BASE="file://$ROOT/raw" \
 RELEASE_BASE="file://$ROOT/release" \
 INSTALL_DIR="$ROOT/update-dir" \
@@ -596,6 +911,22 @@ RELAYPILOT_NO_ROOT=1 \
 RELAYPILOT_INSTALL_DISPATCH_LOG="$ROOT/install-enroll-join.log" \
 RELAYPILOT_INSTALL_ENROLL_MODE=join \
 bash ./install-relaypilot.sh --enroll 'INVITE_SMOKE' > "$ROOT/installer-enroll-join.out" 2> "$ROOT/installer-enroll-join.err"
+RAW_BASE="file://$ROOT/raw-enroll" \
+RELEASE_BASE="file://$ROOT/release-enroll" \
+VERSION="v-local" \
+INSTALL_DIR="$ROOT/relay-installer-hub-mode" \
+BIN_PATH="$ROOT/bin/relaypilot-hub-mode" \
+RELAYPILOT_NO_ROOT=1 \
+RELAYPILOT_INSTALL_DISPATCH_LOG="$ROOT/install-hub-mode.log" \
+bash ./install-relaypilot.sh hub > "$ROOT/installer-hub-mode.out" 2> "$ROOT/installer-hub-mode.err"
+RAW_BASE="file://$ROOT/raw-enroll" \
+RELEASE_BASE="file://$ROOT/release-enroll" \
+VERSION="v-local" \
+INSTALL_DIR="$ROOT/relay-installer-agent-mode" \
+BIN_PATH="$ROOT/bin/relaypilot-agent-mode" \
+RELAYPILOT_NO_ROOT=1 \
+RELAYPILOT_INSTALL_DISPATCH_LOG="$ROOT/install-agent-mode.log" \
+bash ./install-relaypilot.sh agent > "$ROOT/installer-agent-mode.out" 2> "$ROOT/installer-agent-mode.err"
 
 printf '0\n' | RAW_BASE="file://$ROOT/raw" \
 RELEASE_BASE="file://$ROOT/release" \
@@ -621,14 +952,25 @@ grep -q '下载 Go core' "$ROOT/update-force.out"
 [[ -x "$ROOT/update-dir/relaypilot.sh" ]]
 [[ -x "$ROOT/update-dir/bin/relaypilot" ]]
 [[ -L "$ROOT/bin/relaypilot-updated" || -x "$ROOT/bin/relaypilot-updated" ]]
+[[ -L "$ROOT/bin/relaypilot-hub" || -x "$ROOT/bin/relaypilot-hub" ]]
+[[ -L "$ROOT/bin/relaypilot-agent" || -x "$ROOT/bin/relaypilot-agent" ]]
 grep -q 'Installed entrypoint' "$ROOT/installer-noninteractive.out"
+grep -q 'Installed Hub entrypoint' "$ROOT/installer-noninteractive.out"
+grep -q 'Installed Agent entrypoint' "$ROOT/installer-noninteractive.out"
+grep -q 'Run: relaypilot-hub' "$ROOT/installer-noninteractive.out"
+grep -q 'Run: relaypilot-agent' "$ROOT/installer-noninteractive.out"
 ! grep -q '^RelayPilot$' "$ROOT/installer-noninteractive.out"
-grep -q '^agent enroll --invite INVITE_SMOKE --install-service$' "$ROOT/install-enroll-auto.log"
-grep -q '^agent join --invite INVITE_SMOKE$' "$ROOT/install-enroll-join.log"
-grep -q 'RelayPilot' "$ROOT/installer-menu.out"
-grep -q 'Hub 模式' "$ROOT/installer-menu.out"
+grep -q '^enroll --invite INVITE_SMOKE --install-service$' "$ROOT/install-enroll-auto.log"
+grep -q '^join --invite INVITE_SMOKE$' "$ROOT/install-enroll-join.log"
+grep -q '^install$' "$ROOT/install-hub-mode.log"
+grep -q '^install$' "$ROOT/install-agent-mode.log"
+grep -q 'RelayPilot 安装' "$ROOT/installer-menu.out"
+grep -q '安装/进入 Hub' "$ROOT/installer-menu.out"
+grep -q '安装/进入 Agent' "$ROOT/installer-menu.out"
 [[ -x "$ROOT/install-dir/relaypilot.sh" ]]
 [[ -L "$ROOT/bin/relaypilot-self" || -x "$ROOT/bin/relaypilot-self" ]]
+[[ -L "$ROOT/bin/relaypilot-hub" || -x "$ROOT/bin/relaypilot-hub" ]]
+[[ -L "$ROOT/bin/relaypilot-agent" || -x "$ROOT/bin/relaypilot-agent" ]]
 
 INSTALL_DIR="$ROOT/install-dir" \
 BIN_PATH="$ROOT/bin/relaypilot-self" \
@@ -649,7 +991,10 @@ grep -q '"protocol": "socks"' "$ROOT/socks-state/endpoints/la-direct.json"
 grep -q '"tag": "landing-la-direct-socks"' "$ROOT/socks-state/endpoints/la-direct.json"
 grep -q '44444444-4444-4444-8444-444444444444' "$ROOT/transit-conf/00-relaypilot-reality.json"
 grep -q '"private_key"' "$ROOT/transit-conf/00-relaypilot-reality.json"
+grep -q "$TRANSIT_PRIVATE_KEY_SMOKE" "$ROOT/transit-conf/00-relaypilot-reality.json"
 grep -q '0123456789abcdef' "$ROOT/transit-conf/00-relaypilot-reality.json"
+grep -q 'www.example.com' "$ROOT/transit-conf/00-relaypilot-reality.json"
+grep -q '"listen_port": 8443' "$ROOT/transit-conf/00-relaypilot-reality.json"
 grep -q '"type": "shadowsocks"' "$ROOT/transit-conf/90-relaypilot-outbounds.json"
 grep -q 'landing-hk-ss' "$ROOT/transit-conf/90-relaypilot-outbounds.json"
 grep -q '"auth_user"' "$ROOT/transit-conf/91-relaypilot-route.json"

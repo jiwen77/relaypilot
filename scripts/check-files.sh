@@ -59,6 +59,7 @@ for path in \
   scripts/test.sh \
   scripts/build-release.sh \
   scripts/smoke-agent.sh \
+  scripts/smoke-menu.sh \
   scripts/smoke-uninstall.sh \
   scripts/install-local-go.sh \
   scripts/check-files.sh

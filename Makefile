@@ -1,16 +1,19 @@
-.PHONY: test syntax go-test smoke uninstall-smoke files build release-check
+.PHONY: test syntax go-test smoke menu-smoke uninstall-smoke files build release-check
 
-test: syntax go-test smoke uninstall-smoke files
+test: syntax go-test smoke menu-smoke uninstall-smoke files
 	if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then git diff --check; fi
 
 syntax:
-	bash -n relaypilot.sh install-relaypilot.sh scripts/smoke-agent.sh scripts/smoke-uninstall.sh
+	bash -n relaypilot.sh install-relaypilot.sh scripts/smoke-agent.sh scripts/smoke-menu.sh scripts/smoke-uninstall.sh
 
 go-test:
 	@if command -v go >/dev/null 2>&1; then go test ./...; else echo "go not found; skipping Go tests"; fi
 
 smoke:
 	bash scripts/smoke-agent.sh
+
+menu-smoke:
+	bash scripts/smoke-menu.sh
 
 uninstall-smoke:
 	bash scripts/smoke-uninstall.sh

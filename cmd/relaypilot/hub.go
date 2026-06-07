@@ -65,13 +65,15 @@ const (
 
 var hubViewCache = struct {
 	sync.Mutex
-	agents   map[string]hubAgentCacheEntry
-	tasks    map[string]hubTaskCacheEntry
-	topology map[string]hubTopologyIndex
+	agents     map[string]hubAgentCacheEntry
+	tasks      map[string]hubTaskCacheEntry
+	topology   map[string]hubTopologyIndex
+	taskPruned map[string]time.Time
 }{
-	agents:   map[string]hubAgentCacheEntry{},
-	tasks:    map[string]hubTaskCacheEntry{},
-	topology: map[string]hubTopologyIndex{},
+	agents:     map[string]hubAgentCacheEntry{},
+	tasks:      map[string]hubTaskCacheEntry{},
+	topology:   map[string]hubTopologyIndex{},
+	taskPruned: map[string]time.Time{},
 }
 
 func hubAgentsFileSignature(stateDir string) (string, error) {
@@ -1412,6 +1414,117 @@ func listHubAlerts(stateDir string) ([]obj, error) {
 	return alerts, nil
 }
 
+type hubCompletedTaskFile struct {
+	path        string
+	id          string
+	status      string
+	completedAt int64
+}
+
+func isCompletedHubTaskStatus(status string) bool {
+	return status == "done" || status == "failed" || status == "cancelled"
+}
+
+func hubTaskCompletedAt(task obj) int64 {
+	for _, key := range []string{"completed_at", "cancelled_at", "updated_at", "created_at"} {
+		if ts := int64Value(task[key]); ts > 0 {
+			return ts
+		}
+	}
+	return 0
+}
+
+func pruneHubTasks(stateDir string, retentionSeconds int64, maxCompleted int) (obj, error) {
+	dir := hubTasksDir(stateDir)
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return obj{"scanned": 0, "deleted": 0, "kept_completed": 0, "active": 0}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	nowTs := now()
+	var completed []hubCompletedTaskFile
+	deleted := 0
+	active := 0
+	scanned := 0
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		path := filepath.Join(dir, e.Name())
+		task, err := loadJSON(path)
+		if err != nil {
+			return nil, err
+		}
+		if str(task["kind"]) != hubTaskKind {
+			continue
+		}
+		scanned++
+		status := str(task["status"])
+		if !isCompletedHubTaskStatus(status) {
+			active++
+			continue
+		}
+		completedAt := hubTaskCompletedAt(task)
+		if retentionSeconds > 0 && completedAt > 0 && nowTs-completedAt > retentionSeconds {
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return nil, err
+			}
+			deleted++
+			continue
+		}
+		completed = append(completed, hubCompletedTaskFile{
+			path:        path,
+			id:          firstNonEmpty(str(task["id"]), strings.TrimSuffix(e.Name(), ".json")),
+			status:      status,
+			completedAt: completedAt,
+		})
+	}
+	sort.Slice(completed, func(i, j int) bool {
+		if completed[i].completedAt == completed[j].completedAt {
+			return completed[i].id > completed[j].id
+		}
+		return completed[i].completedAt > completed[j].completedAt
+	})
+	if maxCompleted > 0 && len(completed) > maxCompleted {
+		for _, item := range completed[maxCompleted:] {
+			if err := os.Remove(item.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return nil, err
+			}
+			deleted++
+		}
+		completed = completed[:maxCompleted]
+	}
+	if deleted > 0 {
+		invalidateHubTaskCache(stateDir)
+	}
+	return obj{
+		"scanned":              scanned,
+		"deleted":              deleted,
+		"kept_completed":       len(completed),
+		"active":               active,
+		"retention_seconds":    retentionSeconds,
+		"max_completed_tasks":  maxCompleted,
+		"prune_interval_secs":  defaultTaskPruneIntervalSecs,
+		"max_result_text_size": maxStoredTaskStringBytes,
+	}, nil
+}
+
+func maybePruneHubTasks(stateDir string) {
+	interval := time.Duration(defaultTaskPruneIntervalSecs) * time.Second
+	nowTime := time.Now()
+	hubViewCache.Lock()
+	last := hubViewCache.taskPruned[stateDir]
+	if !last.IsZero() && nowTime.Sub(last) < interval {
+		hubViewCache.Unlock()
+		return
+	}
+	hubViewCache.taskPruned[stateDir] = nowTime
+	hubViewCache.Unlock()
+	_, _ = pruneHubTasks(stateDir, defaultTaskRetentionSeconds, defaultMaxCompletedHubTasks)
+}
+
 func recoverStaleHubTasks(stateDir string, leaseTimeoutSeconds, maxLeaseCount int64) (obj, error) {
 	if leaseTimeoutSeconds <= 0 {
 		leaseTimeoutSeconds = defaultTaskLeaseTimeoutSeconds
@@ -1419,7 +1532,19 @@ func recoverStaleHubTasks(stateDir string, leaseTimeoutSeconds, maxLeaseCount in
 	if maxLeaseCount <= 0 {
 		maxLeaseCount = defaultTaskMaxLeaseCount
 	}
-	tasks, err := listHubTasks(stateDir)
+	dir := hubTasksDir(stateDir)
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return obj{
+			"checked_running":       0,
+			"requeued":              0,
+			"failed":                0,
+			"requeued_tasks":        []any{},
+			"failed_tasks":          []any{},
+			"lease_timeout_seconds": leaseTimeoutSeconds,
+			"max_lease_count":       maxLeaseCount,
+		}, nil
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1428,7 +1553,18 @@ func recoverStaleHubTasks(stateDir string, leaseTimeoutSeconds, maxLeaseCount in
 	failedTasks := []any{}
 	checked := 0
 	changed := false
-	for _, task := range tasks {
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		path := filepath.Join(dir, e.Name())
+		task, err := loadJSON(path)
+		if err != nil {
+			return nil, err
+		}
+		if str(task["kind"]) != hubTaskKind {
+			continue
+		}
 		if str(task["status"]) != "running" {
 			continue
 		}
@@ -1437,7 +1573,6 @@ func recoverStaleHubTasks(stateDir string, leaseTimeoutSeconds, maxLeaseCount in
 		if leasedAt <= 0 || nowTs-leasedAt < leaseTimeoutSeconds {
 			continue
 		}
-		path := str(task["path"])
 		delete(task, "path")
 		leaseCount := int64Value(task["lease_count"])
 		task["last_timeout_at"] = nowTs
@@ -1479,6 +1614,7 @@ func recoverStaleHubTasks(stateDir string, leaseTimeoutSeconds, maxLeaseCount in
 }
 
 func leaseHubAgentTasks(stateDir, agentID string, limit int) ([]obj, error) {
+	maybePruneHubTasks(stateDir)
 	if _, err := recoverStaleHubTasks(stateDir, defaultTaskLeaseTimeoutSeconds, defaultTaskMaxLeaseCount); err != nil {
 		return nil, err
 	}
@@ -1547,10 +1683,7 @@ func completeHubTask(stateDir, taskID, agentID string, result obj) (obj, error) 
 			task["export_cache_error"] = err.Error()
 		}
 	}
-	storedResult := result
-	if str(task["command"]) == "export_endpoint" {
-		storedResult = sanitizeTaskResult(result)
-	}
+	storedResult := sanitizeTaskResult(result)
 	task["result"] = storedResult
 	if str(task["command"]) == "sync_agent" && task["status"] == "done" {
 		if err := storeHubSyncSnapshot(stateDir, agentID, result); err != nil {
@@ -1591,14 +1724,14 @@ func sanitizeTaskPayload(payload obj) obj {
 	out := obj{}
 	for k, v := range payload {
 		if k == "endpoint" {
-			out[k] = redactEndpoint(asObj(v))
+			out[k] = limitStoredTaskValue(redactEndpoint(asObj(v)))
 			continue
 		}
 		if k == "mesh_landing" || k == "mesh_transit" {
-			out[k] = redactMeshSpec(asObj(v))
+			out[k] = limitStoredTaskValue(redactMeshSpec(asObj(v)))
 			continue
 		}
-		out[k] = v
+		out[k] = limitStoredTaskValue(v)
 	}
 	return out
 }
@@ -1610,12 +1743,36 @@ func sanitizeTaskResult(result obj) obj {
 	out := obj{}
 	for k, v := range result {
 		if k == "endpoint" {
-			out[k] = redactEndpoint(asObj(v))
+			out[k] = limitStoredTaskValue(redactEndpoint(asObj(v)))
 			continue
 		}
-		out[k] = v
+		out[k] = limitStoredTaskValue(v)
 	}
 	return out
+}
+
+func limitStoredTaskValue(value any) any {
+	switch v := value.(type) {
+	case string:
+		if len(v) <= maxStoredTaskStringBytes {
+			return v
+		}
+		return v[:maxStoredTaskStringBytes] + fmt.Sprintf("... [truncated %d bytes]", len(v)-maxStoredTaskStringBytes)
+	case []any:
+		out := make([]any, len(v))
+		for i, item := range v {
+			out[i] = limitStoredTaskValue(item)
+		}
+		return out
+	case map[string]any:
+		out := obj{}
+		for k, item := range v {
+			out[k] = limitStoredTaskValue(item)
+		}
+		return out
+	default:
+		return value
+	}
 }
 
 func redactEndpoint(endpoint obj) obj {
@@ -2871,18 +3028,18 @@ func hubLinkTransitLanding(stateDir string, agents []obj, args []string, originT
 		"🔗 已下发串联任务",
 		fmt.Sprintf("链路：%s → %s", transitID, landingID),
 		fmt.Sprintf("模式：%s", formatLinkMode(linkMode)),
-		fmt.Sprintf("落地 endpoint：%s", endpointName),
-		fmt.Sprintf("auth_user：%s", payload["auth_user"]),
+		fmt.Sprintf("出口名称：%s", endpointName),
+		fmt.Sprintf("客户端名称：%s", payload["auth_user"]),
 		fmt.Sprintf("批次：%s", batchID),
 	}
 	if linkMode == "mesh" {
 		summary := asObj(payload["mesh"])
 		lines = append(lines,
 			fmt.Sprintf("组网：%s · transit %s ↔ landing %s", summary["interface"], summary["transit_ip"], summary["landing_ip"]),
-			"流程：落地先建专用 WireGuard，再回传 endpoint；中转建同一小网并绑定 overlay 地址。",
+			"流程：落地先建专用 WireGuard，再回传出口配置；中转建同一小网并绑定 overlay 地址。",
 		)
 	} else {
-		lines = append(lines, "流程：落地先回传 endpoint，Hub 再自动下发给中转绑定。")
+		lines = append(lines, "流程：落地先回传出口配置，Hub 再自动下发给中转绑定。")
 	}
 	if applyDataPlane && restartService {
 		lines = append(lines, "生效：中转绑定后会自动 sing-box check、热重载，失败再重启。")

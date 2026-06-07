@@ -6,6 +6,8 @@ RAW_REF="${RAW_REF:-main}"
 VERSION="${VERSION:-latest}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/relaypilot}"
 BIN_PATH="${BIN_PATH:-/usr/local/bin/relaypilot}"
+HUB_BIN_PATH="${HUB_BIN_PATH:-$(dirname "$BIN_PATH")/relaypilot-hub}"
+AGENT_BIN_PATH="${AGENT_BIN_PATH:-$(dirname "$BIN_PATH")/relaypilot-agent}"
 RAW_BASE="${RAW_BASE:-https://github.com/${REPO}/raw/${RAW_REF}}"
 RELEASE_BASE="${RELEASE_BASE:-https://github.com/${REPO}/releases/download}"
 
@@ -77,12 +79,27 @@ else
   exit 1
 fi
 
+mkdir -p "$(dirname "$BIN_PATH")" "$(dirname "$HUB_BIN_PATH")" "$(dirname "$AGENT_BIN_PATH")"
 ln -sf "$INSTALL_DIR/relaypilot.sh" "$BIN_PATH"
+ln -sf "$INSTALL_DIR/relaypilot.sh" "$HUB_BIN_PATH"
+ln -sf "$INSTALL_DIR/relaypilot.sh" "$AGENT_BIN_PATH"
 echo "Installed entrypoint: $BIN_PATH"
-echo "Run: relaypilot"
+echo "Installed Hub entrypoint: $HUB_BIN_PATH"
+echo "Installed Agent entrypoint: $AGENT_BIN_PATH"
+echo "Run: relaypilot-hub    # Hub 面板"
+echo "Run: relaypilot-agent  # Agent 面板"
+echo "Run: relaypilot        # 总面板"
 
 if [[ $# -gt 0 ]]; then
   case "${1:-}" in
+    hub|--hub)
+      shift || true
+      "$HUB_BIN_PATH" install "$@"
+      ;;
+    agent|--agent)
+      shift || true
+      "$AGENT_BIN_PATH" install "$@"
+      ;;
     menu|--menu|interactive|--interactive)
       shift || true
       "$BIN_PATH"
@@ -92,16 +109,16 @@ if [[ $# -gt 0 ]]; then
       invite="$2"; shift 2
       case "${RELAYPILOT_INSTALL_ENROLL_MODE:-}" in
         join|interactive)
-          "$BIN_PATH" agent join --invite "$invite" "$@"
+          "$AGENT_BIN_PATH" join --invite "$invite" "$@"
           ;;
         auto|noninteractive)
-          "$BIN_PATH" agent enroll --invite "$invite" --install-service "$@"
+          "$AGENT_BIN_PATH" enroll --invite "$invite" --install-service "$@"
           ;;
         *)
           if [[ -t 0 && -t 1 ]]; then
-            "$BIN_PATH" agent join --invite "$invite" "$@"
+            "$AGENT_BIN_PATH" join --invite "$invite" "$@"
           else
-            "$BIN_PATH" agent enroll --invite "$invite" --install-service "$@"
+            "$AGENT_BIN_PATH" enroll --invite "$invite" --install-service "$@"
           fi
           ;;
       esac
@@ -109,7 +126,7 @@ if [[ $# -gt 0 ]]; then
     --bundle)
       if [[ $# -lt 2 ]]; then echo "ERROR: --bundle requires a value" >&2; exit 1; fi
       bundle="$2"; shift 2
-      "$BIN_PATH" agent enroll --bundle "$bundle" --install-service "$@"
+      "$AGENT_BIN_PATH" enroll --bundle "$bundle" --install-service "$@"
       ;;
     *)
       "$BIN_PATH" "$@"

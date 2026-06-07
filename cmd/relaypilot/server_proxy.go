@@ -807,6 +807,546 @@ func exportEndpoint(stateDir, name string) (obj, error) {
 	return applyPublicEntryToEndpoint(stateDir, endpoint)
 }
 
+func listExportedEndpoints(stateDir string) ([]obj, error) {
+	dir := filepath.Join(stateDir, "endpoints")
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return []obj{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var out []obj
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		endpoint, err := loadEndpoint(filepath.Join(dir, entry.Name()), true)
+		if err != nil {
+			return nil, err
+		}
+		endpoint, err = applyPublicEntryToEndpoint(stateDir, endpoint)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, endpoint)
+	}
+	sort.Slice(out, func(i, j int) bool { return str(out[i]["name"]) < str(out[j]["name"]) })
+	return out, nil
+}
+
+func addressForDisplay(host string, port any) string {
+	p := int64Value(port)
+	if strings.TrimSpace(host) == "" || p <= 0 {
+		return "未配置"
+	}
+	if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") {
+		return net.JoinHostPort(host, strconv.FormatInt(p, 10))
+	}
+	return fmt.Sprintf("%s:%d", host, p)
+}
+
+func authorityForURI(host string, port any) string {
+	h := strings.TrimSpace(host)
+	p := int64Value(port)
+	if h == "" || p <= 0 {
+		return ""
+	}
+	if strings.HasPrefix(h, "[") && strings.HasSuffix(h, "]") {
+		h = strings.TrimPrefix(strings.TrimSuffix(h, "]"), "[")
+	}
+	return net.JoinHostPort(h, strconv.FormatInt(p, 10))
+}
+
+func appendURIParam(parts []string, key, value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return parts
+	}
+	return append(parts, key+"="+url.QueryEscape(value))
+}
+
+func vlessRealityURI(client obj) string {
+	uuid := strings.TrimSpace(str(client["uuid"]))
+	authority := authorityForURI(str(client["server"]), client["server_port"])
+	if uuid == "" || authority == "" {
+		return ""
+	}
+	flow := firstNonEmpty(str(client["flow"]), "xtls-rprx-vision")
+	fingerprint := firstNonEmpty(str(client["fingerprint"]), "chrome")
+	params := []string{"encryption=none", "security=reality"}
+	params = appendURIParam(params, "sni", str(client["server_name"]))
+	params = appendURIParam(params, "fp", fingerprint)
+	params = appendURIParam(params, "pbk", str(client["public_key"]))
+	params = appendURIParam(params, "sid", str(client["short_id"]))
+	params = appendURIParam(params, "type", "tcp")
+	params = appendURIParam(params, "flow", flow)
+	uri := "vless://" + url.PathEscape(uuid) + "@" + authority
+	if len(params) > 0 {
+		uri += "?" + strings.Join(params, "&")
+	}
+	if name := firstNonEmpty(str(client["auth_user"]), "client"); name != "" {
+		uri += "#" + url.QueryEscape(name)
+	}
+	return uri
+}
+
+func connectionInfoSection(title string) string {
+	return "==================== " + title + " ====================\n"
+}
+
+func jsonSnippet(value any) string {
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return "{}"
+	}
+	return string(data)
+}
+
+func safeOutboundTag(value, fallback string) string {
+	tag := strings.TrimSpace(value)
+	if safeTagRE.MatchString(tag) {
+		return tag
+	}
+	return fallback
+}
+
+func yamlQuote(value string) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	for _, r := range value {
+		switch r {
+		case '\\':
+			b.WriteString("\\\\")
+		case '"':
+			b.WriteString("\\\"")
+		case '\n':
+			b.WriteString("\\n")
+		case '\r':
+			b.WriteString("\\r")
+		case '\t':
+			b.WriteString("\\t")
+		default:
+			b.WriteRune(r)
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
+}
+
+func uniqueMihomoProxyName(base string, used map[string]int) string {
+	base = strings.TrimSpace(base)
+	if base == "" {
+		base = "proxy"
+	}
+	candidate := base
+	for idx := 2; used[candidate] > 0; idx++ {
+		candidate = fmt.Sprintf("%s-%d", base, idx)
+	}
+	used[candidate] = 1
+	return candidate
+}
+
+func vlessSingBoxOutbound(client obj) obj {
+	flow := firstNonEmpty(str(client["flow"]), "xtls-rprx-vision")
+	fingerprint := firstNonEmpty(str(client["fingerprint"]), "chrome")
+	outbound := obj{
+		"type":        "vless",
+		"tag":         safeOutboundTag(str(client["auth_user"]), "vless-out"),
+		"server":      str(client["server"]),
+		"server_port": int64Value(client["server_port"]),
+		"uuid":        str(client["uuid"]),
+		"flow":        flow,
+		"network":     "tcp",
+	}
+	tls := obj{"enabled": true}
+	if serverName := str(client["server_name"]); serverName != "" {
+		tls["server_name"] = serverName
+	}
+	if fingerprint != "" {
+		tls["utls"] = obj{"enabled": true, "fingerprint": fingerprint}
+	}
+	reality := obj{"enabled": true}
+	if publicKey := str(client["public_key"]); publicKey != "" {
+		reality["public_key"] = publicKey
+	}
+	if shortID := str(client["short_id"]); shortID != "" {
+		reality["short_id"] = shortID
+	}
+	tls["reality"] = reality
+	outbound["tls"] = tls
+	return outbound
+}
+
+func mihomoRealityProxy(client obj, name string) obj {
+	proxy := obj{
+		"name":       name,
+		"type":       "vless",
+		"server":     str(client["server"]),
+		"port":       int64Value(client["server_port"]),
+		"uuid":       str(client["uuid"]),
+		"udp":        true,
+		"tls":        true,
+		"network":    "tcp",
+		"encryption": "",
+	}
+	if flow := firstNonEmpty(str(client["flow"]), "xtls-rprx-vision"); flow != "" {
+		proxy["flow"] = flow
+	}
+	if serverName := str(client["server_name"]); serverName != "" {
+		proxy["servername"] = serverName
+	}
+	if fingerprint := firstNonEmpty(str(client["fingerprint"]), "chrome"); fingerprint != "" {
+		proxy["client-fingerprint"] = fingerprint
+	}
+	reality := obj{}
+	if publicKey := str(client["public_key"]); publicKey != "" {
+		reality["public-key"] = publicKey
+	}
+	if shortID := str(client["short_id"]); shortID != "" {
+		reality["short-id"] = shortID
+	}
+	if len(reality) > 0 {
+		proxy["reality-opts"] = reality
+	}
+	return proxy
+}
+
+func mihomoEndpointProxy(endpoint obj, name string) obj {
+	switch str(endpoint["protocol"]) {
+	case "shadowsocks":
+		proxy := obj{
+			"name":     name,
+			"type":     "ss",
+			"server":   str(endpoint["server"]),
+			"port":     int64Value(endpoint["server_port"]),
+			"cipher":   str(endpoint["method"]),
+			"password": str(endpoint["password"]),
+		}
+		switch str(endpoint["network"]) {
+		case "udp", "tcp,udp", "udp,tcp", "":
+			proxy["udp"] = true
+		}
+		return proxy
+	case "socks":
+		proxy := obj{
+			"name":   name,
+			"type":   "socks5",
+			"server": str(endpoint["server"]),
+			"port":   int64Value(endpoint["server_port"]),
+		}
+		if username := str(endpoint["username"]); username != "" {
+			proxy["username"] = username
+		}
+		if password := str(endpoint["password"]); password != "" {
+			proxy["password"] = password
+		}
+		return proxy
+	default:
+		return nil
+	}
+}
+
+func mihomoProxyNameForClient(client obj, used map[string]int) string {
+	base := firstNonEmpty(str(client["auth_user"]), "vless") + "-vless"
+	return uniqueMihomoProxyName(base, used)
+}
+
+func mihomoProxyNameForEndpoint(endpoint obj, used map[string]int) string {
+	suffix := str(endpoint["protocol"])
+	switch suffix {
+	case "shadowsocks":
+		suffix = "ss"
+	case "socks":
+		suffix = "socks"
+	}
+	base := firstNonEmpty(str(endpoint["name"]), "landing") + "-" + suffix
+	return uniqueMihomoProxyName(base, used)
+}
+
+func appendMihomoProxyYAMLLines(lines []string, proxy obj) []string {
+	if len(proxy) == 0 {
+		return lines
+	}
+	lines = append(lines, "- name: "+yamlQuote(str(proxy["name"])))
+	lines = append(lines, "  type: "+str(proxy["type"]))
+	lines = append(lines, "  server: "+yamlQuote(str(proxy["server"])))
+	lines = append(lines, "  port: "+strconv.FormatInt(int64Value(proxy["port"]), 10))
+	switch str(proxy["type"]) {
+	case "vless":
+		lines = append(lines, "  uuid: "+yamlQuote(str(proxy["uuid"])))
+		lines = append(lines, "  udp: true")
+		lines = append(lines, "  tls: true")
+		if serverName := str(proxy["servername"]); serverName != "" {
+			lines = append(lines, "  servername: "+yamlQuote(serverName))
+		}
+		if fingerprint := str(proxy["client-fingerprint"]); fingerprint != "" {
+			lines = append(lines, "  client-fingerprint: "+fingerprint)
+		}
+		if flow := str(proxy["flow"]); flow != "" {
+			lines = append(lines, "  flow: "+flow)
+		}
+		lines = append(lines, "  network: "+firstNonEmpty(str(proxy["network"]), "tcp"))
+		lines = append(lines, "  encryption: "+yamlQuote(str(proxy["encryption"])))
+		reality := asObj(proxy["reality-opts"])
+		if len(reality) > 0 {
+			lines = append(lines, "  reality-opts:")
+			if publicKey := str(reality["public-key"]); publicKey != "" {
+				lines = append(lines, "    public-key: "+yamlQuote(publicKey))
+			}
+			if shortID := str(reality["short-id"]); shortID != "" {
+				lines = append(lines, "    short-id: "+yamlQuote(shortID))
+			}
+		}
+	case "ss":
+		lines = append(lines, "  cipher: "+yamlQuote(str(proxy["cipher"])))
+		lines = append(lines, "  password: "+yamlQuote(str(proxy["password"])))
+		if truthy(proxy["udp"]) {
+			lines = append(lines, "  udp: true")
+		}
+	case "socks5":
+		if username := str(proxy["username"]); username != "" {
+			lines = append(lines, "  username: "+yamlQuote(username))
+		}
+		if password := str(proxy["password"]); password != "" {
+			lines = append(lines, "  password: "+yamlQuote(password))
+		}
+	}
+	return lines
+}
+
+func mihomoProxiesYAML(clients, endpoints []any) string {
+	used := map[string]int{}
+	lines := []string{"proxies:"}
+	for _, raw := range clients {
+		client := asObj(raw)
+		name := mihomoProxyNameForClient(client, used)
+		lines = appendMihomoProxyYAMLLines(lines, mihomoRealityProxy(client, name))
+	}
+	for _, raw := range endpoints {
+		endpoint := asObj(raw)
+		name := mihomoProxyNameForEndpoint(endpoint, used)
+		proxy := mihomoEndpointProxy(endpoint, name)
+		if len(proxy) > 0 {
+			lines = appendMihomoProxyYAMLLines(lines, proxy)
+		}
+	}
+	if len(lines) == 1 {
+		return ""
+	}
+	return strings.Join(lines, "\n")
+}
+
+func localRealityClientExports(stateDir, conf, authUser string) ([]obj, error) {
+	if conf == "" {
+		return []obj{}, nil
+	}
+	summary, err := inspectConfig(conf)
+	if err != nil {
+		return nil, err
+	}
+	var out []obj
+	for _, raw := range asList(summary["inbounds"]) {
+		inbound := asObj(raw)
+		if str(inbound["type"]) != "vless" {
+			continue
+		}
+		inboundTag := str(firstNonNil(inbound["tag"], "vless-in"))
+		reality, err := vlessInboundClientInfo(conf, inboundTag)
+		if err != nil {
+			return nil, err
+		}
+		entry, err := findPublicEntry(stateDir, "reality", inboundTag)
+		if err != nil {
+			return nil, err
+		}
+		host := str(entry["host"])
+		port := firstNonNil(entry["public_port"], inbound["listen_port"])
+		if host == "" {
+			host = str(inbound["listen"])
+		}
+		for _, userRaw := range asList(inbound["users"]) {
+			user := asObj(userRaw)
+			name := str(user["name"])
+			if authUser != "" && name != authUser {
+				continue
+			}
+			flow := firstNonEmpty(str(user["flow"]), "xtls-rprx-vision")
+			profile := obj{
+				"type":        "vless",
+				"tag":         firstNonEmpty(name, "client"),
+				"server":      host,
+				"server_port": port,
+				"uuid":        user["uuid"],
+				"network":     "tcp",
+				"tls":         true,
+				"flow":        flow,
+				"security":    "reality",
+				"server_name": reality["server_name"],
+				"public_key":  reality["public_key"],
+				"short_id":    reality["short_id"],
+				"fingerprint": "chrome",
+				"inbound_tag": inboundTag,
+			}
+			client := obj{
+				"type":         "vless",
+				"auth_user":    name,
+				"server":       host,
+				"server_port":  port,
+				"uuid":         user["uuid"],
+				"flow":         flow,
+				"transport":    "tcp",
+				"security":     "reality",
+				"server_name":  reality["server_name"],
+				"public_key":   reality["public_key"],
+				"short_id":     reality["short_id"],
+				"fingerprint":  "chrome",
+				"inbound_tag":  inboundTag,
+				"listen":       inbound["listen"],
+				"listen_port":  inbound["listen_port"],
+				"public_entry": entry,
+				"profile":      profile,
+			}
+			if uri := vlessRealityURI(client); uri != "" {
+				client["uri"] = uri
+				profile["uri"] = uri
+			}
+			client["sing_box_outbound"] = vlessSingBoxOutbound(client)
+			client["mihomo_proxy"] = mihomoRealityProxy(client, firstNonEmpty(name, "vless")+"-vless")
+			profile["sing_box_outbound"] = client["sing_box_outbound"]
+			profile["mihomo_proxy"] = client["mihomo_proxy"]
+			out = append(out, client)
+		}
+	}
+	if authUser != "" && len(out) == 0 {
+		return nil, fmt.Errorf("auth_user not found on local reality inbound: %s", authUser)
+	}
+	return out, nil
+}
+
+func agentConnectionInfo(stateDir, conf, authUser string) (obj, error) {
+	realityClients, err := localRealityClientExports(stateDir, conf, authUser)
+	if err != nil {
+		return nil, err
+	}
+	endpoints, err := listExportedEndpoints(stateDir)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := listPublicEntries(stateDir)
+	if err != nil {
+		return nil, err
+	}
+	out := obj{
+		"kind":              "relaypilot/agent-connection-info",
+		"version":           version,
+		"generated_at":      now(),
+		"reality_clients":   objsToAnyList(realityClients),
+		"landing_endpoints": objsToAnyList(endpoints),
+	}
+	if len(entries) > 0 {
+		out["public_entries"] = objsToAnyList(entries)
+	}
+	return out, nil
+}
+
+func objsToAnyList(items []obj) []any {
+	out := make([]any, len(items))
+	for i, item := range items {
+		out[i] = item
+	}
+	return out
+}
+
+func formatAgentConnectionInfoText(info obj) string {
+	clients := asList(info["reality_clients"])
+	endpoints := asList(info["landing_endpoints"])
+	if len(clients) == 0 && len(endpoints) == 0 {
+		return "暂无连接信息。请先配置中转 Reality 或落地出口。"
+	}
+	var b strings.Builder
+	if len(clients) > 0 {
+		b.WriteString(connectionInfoSection("Reality / VLESS"))
+		var shareLinks, singBoxSnippets []obj
+		for _, raw := range clients {
+			client := asObj(raw)
+			clientName := firstNonEmpty(str(client["auth_user"]), "(未命名)")
+			fmt.Fprintf(&b, "- 客户端：%s\n", clientName)
+			fmt.Fprintf(&b, "  地址：%s\n", addressForDisplay(str(client["server"]), client["server_port"]))
+			fmt.Fprintf(&b, "  UUID：%s\n", str(client["uuid"]))
+			fmt.Fprintf(&b, "  SNI：%s\n", str(client["server_name"]))
+			fmt.Fprintf(&b, "  Public Key：%s\n", str(client["public_key"]))
+			fmt.Fprintf(&b, "  Short ID：%s\n", str(client["short_id"]))
+			fmt.Fprintf(&b, "  Flow：%s\n", firstNonEmpty(str(client["flow"]), "xtls-rprx-vision"))
+			fmt.Fprintf(&b, "  Fingerprint：%s\n", firstNonEmpty(str(client["fingerprint"]), "chrome"))
+			if uri := firstNonEmpty(str(client["uri"]), vlessRealityURI(client)); uri != "" {
+				shareLinks = append(shareLinks, obj{"name": clientName, "uri": uri})
+			}
+			outbound := asObj(client["sing_box_outbound"])
+			if len(outbound) == 0 {
+				outbound = vlessSingBoxOutbound(client)
+			}
+			singBoxSnippets = append(singBoxSnippets, obj{"name": clientName, "outbound": outbound})
+		}
+		if len(shareLinks) > 0 {
+			b.WriteByte('\n')
+			b.WriteString(connectionInfoSection("VLESS 分享链接"))
+			for _, link := range shareLinks {
+				fmt.Fprintf(&b, "客户端：%s\n", str(link["name"]))
+				fmt.Fprintf(&b, "%s\n", str(link["uri"]))
+			}
+		}
+		if len(singBoxSnippets) > 0 {
+			b.WriteByte('\n')
+			b.WriteString(connectionInfoSection("sing-box 出站 JSON"))
+			for _, snippet := range singBoxSnippets {
+				fmt.Fprintf(&b, "客户端：%s\n", str(snippet["name"]))
+				b.WriteString(jsonSnippet(snippet["outbound"]))
+				b.WriteByte('\n')
+			}
+		}
+	}
+	if yaml := mihomoProxiesYAML(clients, endpoints); yaml != "" {
+		if b.Len() > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(connectionInfoSection("mihomo proxies YAML"))
+		b.WriteString(yaml)
+		b.WriteByte('\n')
+	}
+	if len(endpoints) > 0 {
+		if b.Len() > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(connectionInfoSection("落地出口"))
+		for _, raw := range endpoints {
+			endpoint := asObj(raw)
+			switch str(endpoint["protocol"]) {
+			case "shadowsocks":
+				fmt.Fprintf(&b, "- %s · Shadowsocks\n", str(endpoint["name"]))
+				fmt.Fprintf(&b, "  地址：%s\n", addressForDisplay(str(endpoint["server"]), endpoint["server_port"]))
+				fmt.Fprintf(&b, "  加密：%s\n", str(endpoint["method"]))
+				fmt.Fprintf(&b, "  密码：%s\n", str(endpoint["password"]))
+				if network := str(endpoint["network"]); network != "" {
+					fmt.Fprintf(&b, "  网络：%s\n", network)
+				}
+			case "socks":
+				fmt.Fprintf(&b, "- %s · SOCKS5\n", str(endpoint["name"]))
+				fmt.Fprintf(&b, "  地址：%s\n", addressForDisplay(str(endpoint["server"]), endpoint["server_port"]))
+				if str(endpoint["username"]) != "" {
+					fmt.Fprintf(&b, "  用户名：%s\n", str(endpoint["username"]))
+					fmt.Fprintf(&b, "  密码：%s\n", str(endpoint["password"]))
+				} else {
+					fmt.Fprintf(&b, "  鉴权：无\n")
+				}
+			default:
+				fmt.Fprintf(&b, "- %s · %s\n", str(endpoint["name"]), str(endpoint["protocol"]))
+				fmt.Fprintf(&b, "  地址：%s\n", addressForDisplay(str(endpoint["server"]), endpoint["server_port"]))
+			}
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
 func endpointToOutbound(endpoint obj) (obj, error) {
 	endpoint, err := validateEndpoint(endpoint, true)
 	if err != nil {
@@ -1167,52 +1707,75 @@ func upsertOutbound(outbounds []any, outbound obj) []any {
 	return append(outbounds, outbound)
 }
 
-func upsertVlessUser(inbound obj, name, uuid, flow string) error {
+func upsertVlessUser(inbound obj, name, uuid, flow string) ([]string, error) {
 	if _, err := ensureSafeName(name, "auth_user"); err != nil {
-		return err
+		return nil, err
 	}
 	users := asList(inbound["users"])
 	if users == nil {
 		users = []any{}
 	}
-	for _, raw := range users {
-		user := asObj(raw)
-		if str(user["name"]) == name {
-			user["uuid"] = uuid
-			if flow != "" {
-				user["flow"] = flow
-			}
-			inbound["users"] = users
-			return nil
-		}
-	}
-	for _, raw := range users {
-		user := asObj(raw)
-		if str(user["uuid"]) == uuid {
-			if str(user["name"]) == "" {
-				user["name"] = name
-			}
-			if flow != "" && str(user["flow"]) == "" {
-				user["flow"] = flow
-			}
-			inbound["users"] = users
-			return nil
-		}
-	}
-	newUser := obj{"name": name, "uuid": uuid}
+	replacement := obj{"name": name, "uuid": uuid}
 	if flow != "" {
-		newUser["flow"] = flow
+		replacement["flow"] = flow
 	}
-	inbound["users"] = append(users, newUser)
-	return nil
+	var out []any
+	var replacedNames []string
+	inserted := false
+	for _, raw := range users {
+		user := asObj(raw)
+		oldName := str(user["name"])
+		matchesName := oldName == name
+		matchesUUID := str(user["uuid"]) == uuid
+		if matchesName || matchesUUID {
+			if oldName != "" && oldName != name && !stringSliceContains(replacedNames, oldName) {
+				replacedNames = append(replacedNames, oldName)
+			}
+			if !inserted {
+				if flow == "" && str(user["flow"]) != "" {
+					replacement["flow"] = user["flow"]
+				}
+				out = append(out, replacement)
+				inserted = true
+			}
+			continue
+		}
+		out = append(out, raw)
+	}
+	if !inserted {
+		out = append(out, replacement)
+	}
+	inbound["users"] = out
+	return replacedNames, nil
 }
 
 func routeMatches(rule obj, inboundTag, authUser string) bool {
 	return listContains(rule["inbound"], inboundTag) && listContains(rule["auth_user"], authUser)
 }
 
+func routeMatchesAny(rule obj, inboundTag string, authUsers []string) bool {
+	if !listContains(rule["inbound"], inboundTag) {
+		return false
+	}
+	for _, authUser := range authUsers {
+		if authUser != "" && listContains(rule["auth_user"], authUser) {
+			return true
+		}
+	}
+	return false
+}
+
 func routeReferencesOutbound(rule obj, outboundTag string) bool {
 	return outboundTag != "" && str(rule["outbound"]) == outboundTag
+}
+
+func stringSliceContains(items []string, target string) bool {
+	for _, item := range items {
+		if item == target {
+			return true
+		}
+	}
+	return false
 }
 
 func listContains(v any, target string) bool {
@@ -1497,7 +2060,8 @@ func bindTransit(conf string, endpoint obj, inboundTag, authUser, clientUUID, fl
 		return nil, err
 	}
 	actualInboundTag := str(firstNonNil(inbound["tag"], inboundTag, "vless-in"))
-	if err := upsertVlessUser(inbound, authUser, clientUUID, flow); err != nil {
+	replacedAuthUsers, err := upsertVlessUser(inbound, authUser, clientUUID, flow)
+	if err != nil {
 		return nil, err
 	}
 	inboundFile.modified = true
@@ -1513,9 +2077,10 @@ func bindTransit(conf string, endpoint obj, inboundTag, authUser, clientUUID, fl
 	route := asObj(routeFile.data["route"])
 	rules := asList(route["rules"])
 	filtered := []any{}
+	authUsersToReplace := append([]string{authUser}, replacedAuthUsers...)
 	for _, raw := range rules {
 		rule := asObj(raw)
-		if len(rule) > 0 && routeMatches(rule, actualInboundTag, authUser) {
+		if len(rule) > 0 && routeMatchesAny(rule, actualInboundTag, authUsersToReplace) {
 			continue
 		}
 		filtered = append(filtered, raw)

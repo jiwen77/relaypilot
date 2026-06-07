@@ -8,6 +8,9 @@ RAW_BASE="${RAW_BASE:-https://github.com/${REPO}/raw/${RAW_REF}}"
 RELEASE_BASE="${RELEASE_BASE:-https://github.com/${REPO}/releases/download}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/relaypilot}"
 BIN_PATH="${BIN_PATH:-/usr/local/bin/relaypilot}"
+HUB_BIN_PATH="${HUB_BIN_PATH:-$(dirname "$BIN_PATH")/relaypilot-hub}"
+AGENT_BIN_PATH="${AGENT_BIN_PATH:-$(dirname "$BIN_PATH")/relaypilot-agent}"
+INVOKED_NAME="$(basename "${0:-relaypilot}")"
 SOURCE_PATH="${BASH_SOURCE[0]}"
 while [[ -L "$SOURCE_PATH" ]]; do
   SOURCE_DIR="$(cd -P "$(dirname "$SOURCE_PATH")" && pwd 2>/dev/null || pwd)"
@@ -187,11 +190,18 @@ usage() {
   cat <<EOF
 RelayPilot v${VERSION}
 
-Single entrypoint. Run without arguments to choose a mode.
+Role entrypoints:
+  relaypilot-hub      # 直接进入 Hub 面板
+  relaypilot-agent    # 直接进入 Agent 面板
+  relaypilot          # 安装/初始化入口
 
 Usage:
   bash relaypilot.sh
   bash relaypilot.sh menu
+  relaypilot hub      # 兼容旧入口
+  relaypilot agent    # 兼容旧入口
+  relaypilot-hub install
+  relaypilot-agent install
   bash relaypilot.sh landing
   bash relaypilot.sh transit
   bash relaypilot.sh hub
@@ -200,6 +210,8 @@ Usage:
   bash relaypilot.sh landing-install-socks
   bash relaypilot.sh transit-init-reality
   bash relaypilot.sh transit-import-bind
+  bash relaypilot.sh connection-info
+  bash relaypilot.sh agent connection-info
   bash relaypilot.sh hub-agent-export --agent-id hk-transit --role transit
   bash relaypilot.sh hub-import-agent /path/to/agent.json
   bash relaypilot.sh hub-issue-token transit-hk
@@ -326,6 +338,229 @@ port_from_host_input() {
 valid_port() {
   local value="$1"
   [[ "$value" =~ ^[0-9]+$ ]] && (( value >= 1 && value <= 65535 ))
+}
+
+random_hex() {
+  local bytes="${1:-8}"
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -hex "$bytes"
+  else
+    od -An -N "$bytes" -tx1 /dev/urandom | tr -d ' \n'
+  fi
+}
+
+random_token() {
+  local bytes="${1:-18}"
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -base64 "$bytes" | tr '+/' '-_' | tr -d '='
+  else
+    od -An -N "$bytes" -tx1 /dev/urandom | tr -d ' \n'
+  fi
+}
+
+random_reality_private_key() {
+  random_token 32
+}
+
+random_uuid() {
+  if command -v uuidgen >/dev/null 2>&1; then
+    uuidgen | tr '[:upper:]' '[:lower:]'
+    return
+  fi
+  local hex
+  hex="$(random_hex 16)"
+  printf '%s-%s-4%s-%s%s-%s\n' \
+    "${hex:0:8}" "${hex:8:4}" "${hex:13:3}" \
+    "$(printf '%x' $(( (0x${hex:16:1} & 3) | 8 )))" "${hex:17:3}" "${hex:20:12}"
+}
+
+config_json_files() {
+  local conf="$1"
+  if [[ -f "$conf" ]]; then
+    printf '%s\n' "$conf"
+  elif [[ -d "$conf" ]]; then
+    find "$conf" -maxdepth 1 -type f -name '*.json' | sort
+  fi
+}
+
+json_string_field_from_conf() {
+  local conf="$1" key="$2" file value
+  while IFS= read -r file; do
+    [[ -n "$file" ]] || continue
+    value="$(
+      awk -v field="$key" '
+        {
+          pattern="^[[:space:]]*\"" field "\"[[:space:]]*:[[:space:]]*\""
+          field_pattern="^[[:space:]]*\"" field "\"[[:space:]]*:"
+        }
+        $0 ~ pattern {
+          line=$0
+          sub(pattern, "", line)
+          sub(/".*$/, "", line)
+          print line
+          exit
+        }
+        $0 ~ field_pattern {
+          pending=1
+          next
+        }
+        pending && $0 ~ /"/ {
+          line=$0
+          sub(/^[^"]*"/, "", line)
+          sub(/".*$/, "", line)
+          print line
+          exit
+        }
+      ' "$file"
+    )"
+    if [[ -n "$value" ]]; then
+      printf '%s\n' "$value"
+      return 0
+    fi
+  done < <(config_json_files "$conf")
+}
+
+json_number_field_from_conf() {
+  local conf="$1" key="$2" file value
+  while IFS= read -r file; do
+    [[ -n "$file" ]] || continue
+    value="$(
+      awk -v field="$key" '
+        {
+          pattern="^[[:space:]]*\"" field "\"[[:space:]]*:[[:space:]]*"
+        }
+        $0 ~ pattern {
+          line=$0
+          sub(pattern, "", line)
+          sub(/[,}].*$/, "", line)
+          gsub(/[[:space:]]/, "", line)
+          if (line ~ /^[0-9]+$/) {
+            print line
+            exit
+          }
+        }
+      ' "$file"
+    )"
+    if [[ -n "$value" ]]; then
+      printf '%s\n' "$value"
+      return 0
+    fi
+  done < <(config_json_files "$conf")
+}
+
+endpoint_json_files() {
+  local dir="$STATE_DIR/endpoints"
+  [[ -d "$dir" ]] || return 0
+  find "$dir" -maxdepth 1 -type f -name '*.json' | sort
+}
+
+json_string_field_from_endpoint() {
+  local protocol="$1" key="$2" file
+  while IFS= read -r file; do
+    [[ -n "$file" ]] || continue
+    [[ "$(json_string_field_from_conf "$file" protocol)" == "$protocol" ]] || continue
+    json_string_field_from_conf "$file" "$key"
+    return 0
+  done < <(endpoint_json_files)
+}
+
+json_number_field_from_endpoint() {
+  local protocol="$1" key="$2" file
+  while IFS= read -r file; do
+    [[ -n "$file" ]] || continue
+    [[ "$(json_string_field_from_conf "$file" protocol)" == "$protocol" ]] || continue
+    json_number_field_from_conf "$file" "$key"
+    return 0
+  done < <(endpoint_json_files)
+}
+
+public_entry_string_field() {
+  local use="$1" name="$2" key="$3" file="$STATE_DIR/public-entries.json" value
+  [[ -f "$file" ]] || return 0
+  value="$(
+    awk -v entry="\"${use}:${name}\"" -v field="$key" '
+      $0 ~ entry { in_entry=1; next }
+      in_entry && $0 ~ /^[[:space:]]*}/ { exit }
+      in_entry {
+        pattern="^[[:space:]]*\"" field "\"[[:space:]]*:[[:space:]]*\""
+      }
+      in_entry && $0 ~ pattern {
+        line=$0
+        sub(pattern, "", line)
+        sub(/".*$/, "", line)
+        print line
+        exit
+      }
+    ' "$file"
+  )"
+  [[ -n "$value" ]] && printf '%s\n' "$value"
+  return 0
+}
+
+public_entry_number_field() {
+  local use="$1" name="$2" key="$3" file="$STATE_DIR/public-entries.json" value
+  [[ -f "$file" ]] || return 0
+  value="$(
+    awk -v entry="\"${use}:${name}\"" -v field="$key" '
+      $0 ~ entry { in_entry=1; next }
+      in_entry && $0 ~ /^[[:space:]]*}/ { exit }
+      in_entry {
+        pattern="^[[:space:]]*\"" field "\"[[:space:]]*:[[:space:]]*"
+      }
+      in_entry && $0 ~ pattern {
+        line=$0
+        sub(pattern, "", line)
+        sub(/[,}].*$/, "", line)
+        gsub(/[[:space:]]/, "", line)
+        if (line ~ /^[0-9]+$/) {
+          print line
+          exit
+        }
+      }
+    ' "$file"
+  )"
+  [[ -n "$value" ]] && printf '%s\n' "$value"
+  return 0
+}
+
+first_endpoint_json_file() {
+  local file
+  while IFS= read -r file; do
+    [[ -n "$file" ]] || continue
+    printf '%s\n' "$file"
+    return 0
+  done < <(endpoint_json_files)
+}
+
+vless_user_uuid_from_conf() {
+  local conf="$1" name="$2" file value
+  [[ -n "$name" ]] || return 0
+  while IFS= read -r file; do
+    [[ -n "$file" ]] || continue
+    value="$(
+      awk -v target="$name" '
+        /"users"[[:space:]]*:/ { in_users=1 }
+        in_users && /}/ { if (in_user) in_user=0 }
+        in_users && /"name"[[:space:]]*:/ {
+          line=$0
+          sub(/^.*"name"[[:space:]]*:[[:space:]]*"/, "", line)
+          sub(/".*$/, "", line)
+          if (line == target) in_user=1
+        }
+        in_user && /"uuid"[[:space:]]*:/ {
+          line=$0
+          sub(/^.*"uuid"[[:space:]]*:[[:space:]]*"/, "", line)
+          sub(/".*$/, "", line)
+          print line
+          exit
+        }
+      ' "$file"
+    )"
+    if [[ -n "$value" ]]; then
+      printf '%s\n' "$value"
+      return 0
+    fi
+  done < <(config_json_files "$conf")
 }
 
 duration_to_minutes() {
@@ -511,7 +746,7 @@ singbox_bin() {
 
 go_core_supports() {
   case "$1" in
-    generate-ss-password|migrate-state|tg-config|tg-status|tg-commands|tg-register-commands|tg-get-commands|tg-delete-commands|tg-dispatch|tg-send|render-landing-ss|render-landing-socks|ensure-transit-reality|validate-endpoint|render-outbound|import-endpoint|export-endpoint|public-entry-set|public-entry-list|bind-transit|list-endpoints|inspect-conf|hub-agent-export|hub-import-agent|hub-agents|hub-remove-agent|hub-removed-agents|hub-alert-offline|hub-alerts|hub-alert-callback|hub-recover-tasks|hub-issue-token|hub-init-tls|hub-issue-agent-cert|hub-provision-agent|hub-create-enroll-code|hub-enroll-code|agent-enroll|agent-set-ip-mode|hub-rotate-token|hub-revoke-token|hub-tokens|hub-dispatch|hub-tasks|hub-results|hub-export-client|hub-export-landing|hub-sync-agent|hub-sync-all|hub-daemon|bot-daemon|agent-poll-once|agent-poll-loop) return 0 ;;
+    generate-ss-password|migrate-state|tg-config|tg-status|tg-commands|tg-register-commands|tg-get-commands|tg-delete-commands|tg-dispatch|tg-send|render-landing-ss|render-landing-socks|ensure-transit-reality|validate-endpoint|render-outbound|import-endpoint|export-endpoint|agent-connection-info|public-entry-set|public-entry-list|bind-transit|list-endpoints|inspect-conf|hub-agent-export|hub-import-agent|hub-agents|hub-remove-agent|hub-removed-agents|hub-alert-offline|hub-alerts|hub-alert-callback|hub-recover-tasks|hub-issue-token|hub-init-tls|hub-issue-agent-cert|hub-provision-agent|hub-create-enroll-code|hub-enroll-code|agent-enroll|agent-set-ip-mode|hub-rotate-token|hub-revoke-token|hub-tokens|hub-dispatch|hub-tasks|hub-results|hub-export-client|hub-export-landing|hub-sync-agent|hub-sync-all|hub-daemon|bot-daemon|agent-poll-once|agent-poll-loop) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -972,6 +1207,14 @@ service_check() {
   fi
 }
 
+install_cli_links() {
+  local script_dest="$1"
+  mkdir -p "$(dirname "$BIN_PATH")" "$(dirname "$HUB_BIN_PATH")" "$(dirname "$AGENT_BIN_PATH")"
+  ln -sf "$script_dest" "$BIN_PATH"
+  ln -sf "$script_dest" "$HUB_BIN_PATH"
+  ln -sf "$script_dest" "$AGENT_BIN_PATH"
+}
+
 install_self() {
   require_root
   mkdir -p "$INSTALL_DIR/bin"
@@ -990,10 +1233,11 @@ install_self() {
     err "缺少 Go core，无法安装 Go-only RelayPilot。请先安装 release 二进制或设置 RELAYPILOT_GO_BIN。"
     return 1
   fi
-  mkdir -p "$(dirname "$BIN_PATH")"
-  ln -sf "$INSTALL_DIR/relaypilot.sh" "$BIN_PATH"
+  install_cli_links "$INSTALL_DIR/relaypilot.sh"
   info "已安装到：$INSTALL_DIR"
   info "CLI：$BIN_PATH"
+  info "Hub 面板：$HUB_BIN_PATH"
+  info "Agent 面板：$AGENT_BIN_PATH"
 }
 
 self_update() {
@@ -1060,7 +1304,7 @@ self_update() {
     warn "未找到 sha256 文件，跳过校验。"
   fi
 
-  mkdir -p "$INSTALL_DIR/bin" "$(dirname "$BIN_PATH")"
+  mkdir -p "$INSTALL_DIR/bin" "$(dirname "$BIN_PATH")" "$(dirname "$HUB_BIN_PATH")" "$(dirname "$AGENT_BIN_PATH")"
   [[ -f "$INSTALL_DIR/relaypilot.sh" ]] && cp -a "$INSTALL_DIR/relaypilot.sh" "$INSTALL_DIR/relaypilot.sh.prev"
   [[ -f "$INSTALL_DIR/bin/relaypilot" ]] && cp -a "$INSTALL_DIR/bin/relaypilot" "$INSTALL_DIR/bin/relaypilot.prev"
   local script_dest core_dest script_new core_new
@@ -1074,11 +1318,13 @@ self_update() {
   chmod +x "$script_new" "$core_new"
   mv -f "$script_new" "$script_dest"
   mv -f "$core_new" "$core_dest"
-  ln -sf "$script_dest" "$BIN_PATH"
+  install_cli_links "$script_dest"
   rm -rf "$tmp"
   unset RELAYPILOT_UPDATE_TMP
 
   info "已更新 RelayPilot：$BIN_PATH"
+  info "Hub 面板：$HUB_BIN_PATH"
+  info "Agent 面板：$AGENT_BIN_PATH"
   "$INSTALL_DIR/bin/relaypilot" version || true
 
   if [[ "$restart_services" == "ask" ]]; then
@@ -1220,6 +1466,8 @@ uninstall_preview() {
   title "卸载预览"
   printf "  程序目录：     %s\n" "$INSTALL_DIR"
   printf "  命令入口：     %s\n" "$BIN_PATH"
+  printf "  Hub 入口：     %s\n" "$HUB_BIN_PATH"
+  printf "  Agent 入口：   %s\n" "$AGENT_BIN_PATH"
   printf "  RelayPilot 服务：%s, %s, %s, %s\n" "$HUB_SERVICE_NAME" "$AGENT_SERVICE_NAME" "$TG_SERVICE_NAME" "$HUB_ALERT_TIMER_NAME"
   if [[ "$purge_state" == "1" ]]; then
     printf "  状态目录：     删除 %s\n" "$STATE_DIR"
@@ -1273,6 +1521,8 @@ uninstall_self() {
   remove_timer_files "$HUB_ALERT_TIMER_NAME"
   [[ "$purge_proxy" == "1" ]] && remove_relaypilot_proxy_fragments
   remove_path "$BIN_PATH"
+  remove_path "$HUB_BIN_PATH"
+  remove_path "$AGENT_BIN_PATH"
   remove_path "$INSTALL_DIR"
   if [[ "$purge_state" == "1" ]]; then
     remove_path "$STATE_DIR"
@@ -1315,8 +1565,9 @@ doctor() {
 }
 
 list_endpoints() { core_cmd list-endpoints --state-dir "$STATE_DIR"; }
-show_endpoint() { local name="${1:-}"; [[ -z "$name" ]] && prompt name "endpoint 名称" "${ENDPOINT_NAME:-landing}"; core_cmd export-endpoint --state-dir "$STATE_DIR" "$name"; }
+show_endpoint() { local name="${1:-}"; [[ -z "$name" ]] && prompt name "出口名称" "${ENDPOINT_NAME:-landing}"; core_cmd export-endpoint --state-dir "$STATE_DIR" "$name"; }
 inspect_conf() { local conf="${1:-}"; [[ -z "$conf" ]] && { if [[ -d "$CONF_DIR" ]]; then conf="$CONF_DIR"; else conf="$SINGBOX_CONFIG_PATH"; fi; }; core_cmd inspect-conf --conf "$conf"; }
+connection_info() { local conf="${1:-}"; [[ -z "$conf" ]] && { if [[ -d "$CONF_DIR" ]]; then conf="$CONF_DIR"; else conf="$SINGBOX_CONFIG_PATH"; fi; }; core_cmd agent-connection-info --state-dir "$STATE_DIR" --conf "$conf"; }
 migrate_state() { core_cmd migrate-state "$@"; }
 public_entry_set() { core_cmd public-entry-set --state-dir "$STATE_DIR" "$@"; }
 public_entry_list() { core_cmd public-entry-list --state-dir "$STATE_DIR" "$@"; }
@@ -1401,13 +1652,13 @@ public_entry_wizard() {
     err "对外端口必须是 1-65535：$public_port"
     return 1
   fi
-  prompt local_port "本机监听端口" "${default_local_port:-$public_port}"
+  prompt local_port "本地端口" "${default_local_port:-$public_port}"
   if [[ -n "$local_port" ]] && ! valid_port "$local_port"; then
-    err "本机监听端口必须是 1-65535：$local_port"
+    err "本地端口必须是 1-65535：$local_port"
     return 1
   fi
   public_entry_set --use "$use" --name "$name" --host "$(host_only "$host")" --public-port "$public_port" --local-port "${local_port:-0}" --network "$network"
-  info "公网入口已保存：${name} ${host}:${public_port} -> local:${local_port:-0}/${network}"
+  info "公网入口已保存：${name} ${host}:${public_port} -> 本地:${local_port:-0}/${network}"
 }
 
 public_entry_menu() {
@@ -1435,18 +1686,52 @@ transit_init_reality() {
   require_root
   ensure_singbox || true
   title "中转节点：初始化 Reality 入口"
-  local conf listen listen_port inbound_tag server_name handshake_server handshake_port short_id args
-  prompt conf "sing-box 配置目录或 config.json" "${TRANSIT_CONF:-$CONF_DIR}"
-  prompt listen "监听地址" "${TRANSIT_LISTEN:-::}"
-  prompt listen_port "监听端口" "${TRANSIT_PORT:-443}"
-  prompt inbound_tag "Reality inbound tag（默认即可）" "${TRANSIT_INBOUND_TAG:-vless-in}"
-  prompt server_name "客户端 SNI/server_name（伪装域名，默认即可）" "${TRANSIT_SERVER_NAME:-www.cloudflare.com}"
-  prompt handshake_server "Reality 握手目标" "${TRANSIT_HANDSHAKE_SERVER:-$server_name}"
-  prompt handshake_port "Reality 握手端口" "${TRANSIT_HANDSHAKE_PORT:-443}"
-  prompt short_id "Reality short_id（空则自动生成）" "${TRANSIT_SHORT_ID:-}"
+  local conf="${TRANSIT_CONF:-$CONF_DIR}" listen listen_port inbound_tag="${TRANSIT_INBOUND_TAG:-vless-in}" server_name handshake_server handshake_port private_key short_id access_host access_port detected_access_host="" input_port args existing_listen existing_listen_port existing_server_name existing_access_host existing_access_port existing_local_port
+  existing_listen="$(json_string_field_from_conf "$conf" listen)"
+  existing_listen_port="$(json_number_field_from_conf "$conf" listen_port)"
+  existing_server_name="$(json_string_field_from_conf "$conf" server_name)"
+  existing_access_host="$(public_entry_string_field reality "$inbound_tag" host)"
+  existing_access_port="$(public_entry_number_field reality "$inbound_tag" public_port)"
+  existing_local_port="$(public_entry_number_field reality "$inbound_tag" local_port)"
+  prompt listen "本地地址/IP" "${TRANSIT_LISTEN:-${existing_listen:-::}}"
+  prompt listen_port "本地端口" "${TRANSIT_PORT:-${existing_listen_port:-${existing_local_port:-443}}}"
+  prompt server_name "伪装域名/SNI" "${TRANSIT_SERVER_NAME:-${existing_server_name:-www.cloudflare.com}}"
+  private_key="${TRANSIT_PRIVATE_KEY:-$(json_string_field_from_conf "$conf" private_key)}"
+  private_key="${private_key:-$(random_reality_private_key)}"
+  prompt private_key "Reality 私钥" "$private_key"
+  short_id="${TRANSIT_SHORT_ID:-$(json_string_field_from_conf "$conf" short_id)}"
+  short_id="${short_id:-$(random_hex 8)}"
+  prompt short_id "Reality short_id" "$short_id"
+  if [[ -z "${REALITY_PUBLIC_HOST:-${PUBLIC_ENTRY_HOST:-${TRANSIT_PUBLIC_HOST:-}}}" && -t 0 ]]; then
+    detected_access_host="$(detect_public_ip || true)"
+  fi
+  prompt access_host "访问地址/IP（空则自动检测）" "${REALITY_PUBLIC_HOST:-${PUBLIC_ENTRY_HOST:-${TRANSIT_PUBLIC_HOST:-${existing_access_host:-$detected_access_host}}}}"
+  input_port="$(port_from_host_input "$access_host")"
+  if [[ -n "$input_port" ]]; then
+    access_port="$input_port"
+    access_host="$(host_only "$access_host")"
+  fi
+  prompt access_port "访问端口" "${REALITY_PUBLIC_PORT:-${PUBLIC_ENTRY_PUBLIC_PORT:-${TRANSIT_PUBLIC_PORT:-${access_port:-${existing_access_port:-$listen_port}}}}}"
+  if [[ -n "$access_port" ]] && ! valid_port "$access_port"; then
+    err "访问端口必须是 1-65535：$access_port"
+    return 1
+  fi
+  handshake_server="${TRANSIT_HANDSHAKE_SERVER:-$server_name}"
+  handshake_port="${TRANSIT_HANDSHAKE_PORT:-443}"
   args=(ensure-transit-reality --conf "$conf" --state-dir "$STATE_DIR" --listen "$listen" --listen-port "$listen_port" --inbound-tag "$inbound_tag" --server-name "$server_name" --handshake-server "$handshake_server" --handshake-port "$handshake_port")
+  [[ -n "$private_key" ]] && args+=(--private-key "$private_key")
   [[ -n "$short_id" ]] && args+=(--short-id "$short_id")
-  core_cmd "${args[@]}"
+  if ! core_cmd "${args[@]}" >/dev/null; then
+    return 1
+  fi
+  if [[ -n "$access_host" ]]; then
+    if public_entry_set --use reality --name "$inbound_tag" --host "$access_host" --public-port "$access_port" --local-port "$listen_port" --network tcp >/dev/null; then
+      info "公网入口已记录：${access_host}:${access_port} -> 本地:${listen_port}"
+    else
+      warn "公网入口记录失败，可稍后在 Agent 模式 -> 公网入口 中重设。"
+    fi
+  fi
+  info "Reality 入口已更新：${listen}:${listen_port}"
   service_check "$conf"
   ensure_service_file "$conf"
   if [[ "${NO_RESTART:-}" != "1" ]] && confirm "是否现在重启 $SERVICE_NAME" y; then service_restart "$SERVICE_NAME"; fi
@@ -1455,76 +1740,115 @@ transit_init_reality() {
 landing_install_ss() {
   require_root
   ensure_singbox || true
-  title "Landing agent: install Shadowsocks endpoint"
-  local name server listen listen_port server_port method password inbound_tag endpoint_tag endpoint_file detected_server=""
-  prompt name "落地名称/endpoint 名（英文数字短横线，例如 jp-biglobe）" "${LANDING_NAME:-landing}"
-  if [[ -z "${LANDING_SERVER:-}" && -t 0 ]]; then
-    detected_server="$(detect_public_ip || true)"
-  fi
-  prompt server "中转机连接此落地的 IP/域名（空则用检测值）" "${LANDING_SERVER:-$detected_server}"
-  prompt listen "落地 sing-box 监听地址" "${LANDING_LISTEN:-::}"
-  prompt listen_port "落地 sing-box 监听端口" "${LANDING_PORT:-443}"
-  prompt server_port "中转机连接端口（NAT 映射时可不同）" "${LANDING_SERVER_PORT:-$listen_port}"
-  select_option method "Shadowsocks 加密方式" "${LANDING_METHOD:-2022-blake3-aes-128-gcm}" \
+  title "安装/更新 Shadowsocks"
+  local name server listen listen_port server_port method password inbound_tag endpoint_tag endpoint_file detected_server="" existing_name existing_server existing_server_port existing_listen existing_listen_port existing_method existing_password
+  existing_name="$(json_string_field_from_endpoint shadowsocks name)"
+  existing_server="$(json_string_field_from_endpoint shadowsocks server)"
+  existing_server_port="$(json_number_field_from_endpoint shadowsocks server_port)"
+  existing_listen="$(json_string_field_from_conf "$SINGBOX_CONFIG_PATH" listen)"
+  existing_listen_port="$(json_number_field_from_conf "$SINGBOX_CONFIG_PATH" listen_port)"
+  existing_method="$(json_string_field_from_conf "$SINGBOX_CONFIG_PATH" method)"
+  existing_method="${existing_method:-$(json_string_field_from_endpoint shadowsocks method)}"
+  existing_password="$(json_string_field_from_conf "$SINGBOX_CONFIG_PATH" password)"
+  existing_password="${existing_password:-$(json_string_field_from_endpoint shadowsocks password)}"
+  prompt name "名称" "${LANDING_NAME:-${existing_name:-landing}}"
+  prompt listen "本地地址/IP" "${LANDING_LISTEN:-${existing_listen:-::}}"
+  prompt listen_port "本地端口" "${LANDING_PORT:-${existing_listen_port:-443}}"
+  select_option method "Shadowsocks 加密方式" "${LANDING_METHOD:-${existing_method:-2022-blake3-aes-128-gcm}}" \
     "2022-blake3-aes-128-gcm|2022 AES-128-GCM|推荐，轻量安全" \
     "2022-blake3-aes-256-gcm|2022 AES-256-GCM|更强，稍重" \
     "chacha20-ietf-poly1305|ChaCha20-Poly1305|兼容老环境"
-  password="${LANDING_PASSWORD:-}"
-  [[ -z "$password" ]] && password="$(core_cmd generate-ss-password --method "$method")"
-  prompt inbound_tag "落地 inbound tag（默认即可）" "${LANDING_INBOUND_TAG:-ss-in}"
-  prompt endpoint_tag "导出给中转的 outbound tag（默认即可）" "${LANDING_ENDPOINT_TAG:-landing-${name}-ss}"
+  if [[ -n "${LANDING_PASSWORD:-}" ]]; then
+    password="$LANDING_PASSWORD"
+  elif [[ -n "$existing_password" && "$existing_method" == "$method" ]]; then
+    password="$existing_password"
+  else
+    password="$(core_cmd generate-ss-password --method "$method")"
+  fi
+  prompt password "Shadowsocks 密码" "$password"
+  if [[ -z "${LANDING_SERVER:-}" && -t 0 ]]; then
+    detected_server="$(detect_public_ip || true)"
+  fi
+  prompt server "访问地址/IP（空则自动检测）" "${LANDING_SERVER:-${existing_server:-$detected_server}}"
+  prompt server_port "访问端口" "${LANDING_SERVER_PORT:-${existing_server_port:-$listen_port}}"
+  inbound_tag="${LANDING_INBOUND_TAG:-ss-in}"
+  endpoint_tag="${LANDING_ENDPOINT_TAG:-landing-${name}-ss}"
   mkdir -p "$STATE_DIR/endpoints"
   endpoint_file="$STATE_DIR/endpoints/${name}.json"
   backup_file_if_exists "$SINGBOX_CONFIG_PATH"
   backup_file_if_exists "$endpoint_file"
-  core_cmd render-landing-ss \
+  if ! core_cmd render-landing-ss \
     --name "$name" --server "$server" --listen "$listen" \
     --listen-port "$listen_port" --server-port "$server_port" \
     --method "$method" --password "$password" \
     --inbound-tag "$inbound_tag" --endpoint-tag "$endpoint_tag" \
-    --config-output "$SINGBOX_CONFIG_PATH" --endpoint-output "$endpoint_file"
+    --config-output "$SINGBOX_CONFIG_PATH" --endpoint-output "$endpoint_file" >/dev/null; then
+    return 1
+  fi
   if public_entry_set --use shadowsocks --name "$name" --host "$server" --public-port "$server_port" --local-port "$listen_port" --network tcp >/dev/null; then
-    info "公网入口已记录：${server}:${server_port} -> local:${listen_port}"
+    info "公网入口已记录：${server}:${server_port} -> 本地:${listen_port}"
   else
     warn "公网入口记录失败，可稍后在 Agent 模式 -> 公网入口 中重设。"
   fi
   info "落地配置已写入：$SINGBOX_CONFIG_PATH"
-  info "endpoint 已写入：$endpoint_file"
+  info "出口 JSON 已写入：$endpoint_file"
   service_check "$SINGBOX_CONFIG_PATH"
   ensure_service_file "$SINGBOX_CONFIG_PATH"
   if [[ "${NO_RESTART:-}" != "1" ]] && confirm "是否现在重启 $SERVICE_NAME" y; then service_restart "$SERVICE_NAME"; fi
-  echo; title "复制给中转机导入的 endpoint JSON"; cat "$endpoint_file"
+  echo; title "复制给中转机导入的出口 JSON"; cat "$endpoint_file"
 }
 
 landing_install_socks() {
   require_root
   ensure_singbox || true
-  title "Landing agent: install SOCKS5 endpoint"
-  local name server listen listen_port server_port username password inbound_tag endpoint_tag endpoint_file detected_server=""
-  prompt name "落地名称/endpoint 名（英文数字短横线，例如 jp-direct）" "${LANDING_SOCKS_NAME:-landing-direct}"
+  title "安装/更新 SOCKS5"
+  local name server listen listen_port server_port username password inbound_tag endpoint_tag endpoint_file detected_server="" existing_name existing_server existing_server_port existing_listen existing_listen_port existing_username existing_password
+  existing_name="$(json_string_field_from_endpoint socks name)"
+  existing_server="$(json_string_field_from_endpoint socks server)"
+  existing_server_port="$(json_number_field_from_endpoint socks server_port)"
+  existing_listen="$(json_string_field_from_conf "$SINGBOX_CONFIG_PATH" listen)"
+  existing_listen_port="$(json_number_field_from_conf "$SINGBOX_CONFIG_PATH" listen_port)"
+  existing_username="$(json_string_field_from_conf "$SINGBOX_CONFIG_PATH" username)"
+  existing_username="${existing_username:-$(json_string_field_from_endpoint socks username)}"
+  existing_password="$(json_string_field_from_conf "$SINGBOX_CONFIG_PATH" password)"
+  existing_password="${existing_password:-$(json_string_field_from_endpoint socks password)}"
+  prompt name "名称" "${LANDING_SOCKS_NAME:-${existing_name:-landing-direct}}"
+  prompt listen "本地地址/IP" "${LANDING_SOCKS_LISTEN:-${existing_listen:-::}}"
+  prompt listen_port "本地端口" "${LANDING_SOCKS_PORT:-${existing_listen_port:-1080}}"
+  prompt username "SOCKS 用户名（留空则不鉴权）" "${LANDING_SOCKS_USERNAME:-$existing_username}"
+  if [[ -n "$username" ]]; then
+    if [[ -n "${LANDING_SOCKS_PASSWORD:-}" ]]; then
+      password="$LANDING_SOCKS_PASSWORD"
+    elif [[ "$username" == "$existing_username" && -n "$existing_password" ]]; then
+      password="$existing_password"
+    else
+      password="$(random_token 18)"
+    fi
+    prompt password "SOCKS 密码" "$password"
+  else
+    password=""
+  fi
   if [[ -z "${LANDING_SOCKS_SERVER:-}" && -t 0 ]]; then
     detected_server="$(detect_public_ip || true)"
   fi
-  prompt server "客户端连接此落地的 IP/域名（空则用检测值）" "${LANDING_SOCKS_SERVER:-$detected_server}"
-  prompt listen "落地 sing-box 监听地址" "${LANDING_SOCKS_LISTEN:-::}"
-  prompt listen_port "落地 SOCKS5 监听端口" "${LANDING_SOCKS_PORT:-1080}"
-  prompt server_port "客户端连接端口（NAT 映射时可不同）" "${LANDING_SOCKS_SERVER_PORT:-$listen_port}"
-  prompt username "SOCKS 用户名（留空则不鉴权）" "${LANDING_SOCKS_USERNAME:-}"
-  prompt password "SOCKS 密码（留空则不鉴权）" "${LANDING_SOCKS_PASSWORD:-}"
-  prompt inbound_tag "落地 inbound tag（默认即可）" "${LANDING_SOCKS_INBOUND_TAG:-socks-in}"
-  prompt endpoint_tag "导出给中转的 outbound tag（默认即可）" "${LANDING_SOCKS_ENDPOINT_TAG:-landing-${name}-socks}"
+  prompt server "访问地址/IP（空则自动检测）" "${LANDING_SOCKS_SERVER:-${existing_server:-$detected_server}}"
+  prompt server_port "访问端口" "${LANDING_SOCKS_SERVER_PORT:-${existing_server_port:-$listen_port}}"
+  inbound_tag="${LANDING_SOCKS_INBOUND_TAG:-socks-in}"
+  endpoint_tag="${LANDING_SOCKS_ENDPOINT_TAG:-landing-${name}-socks}"
   mkdir -p "$STATE_DIR/endpoints"
   endpoint_file="$STATE_DIR/endpoints/${name}.json"
   backup_file_if_exists "$SINGBOX_CONFIG_PATH"
   backup_file_if_exists "$endpoint_file"
-  core_cmd render-landing-socks \
+  if ! core_cmd render-landing-socks \
     --name "$name" --server "$server" --listen "$listen" \
     --listen-port "$listen_port" --server-port "$server_port" \
     --username "$username" --password "$password" \
     --inbound-tag "$inbound_tag" --endpoint-tag "$endpoint_tag" \
-    --config-output "$SINGBOX_CONFIG_PATH" --endpoint-output "$endpoint_file"
+    --config-output "$SINGBOX_CONFIG_PATH" --endpoint-output "$endpoint_file" >/dev/null; then
+    return 1
+  fi
   info "落地配置已写入：$SINGBOX_CONFIG_PATH"
-  info "endpoint 已写入：$endpoint_file"
+  info "出口 JSON 已写入：$endpoint_file"
   if [[ -n "$username" ]]; then
     info "SOCKS5 连接信息：${server}:${server_port}（用户名：${username}）"
   else
@@ -1537,24 +1861,23 @@ landing_install_socks() {
 
 transit_import_bind() {
   require_root
-  title "Transit agent: import endpoint and bind auth_user"
-  local endpoint_file conf inbound_tag auth_user client_uuid imported
-  prompt endpoint_file "落地 endpoint JSON 文件路径" "${ENDPOINT_FILE:-}"
+  title "中转节点：绑定出口"
+  local endpoint_file conf="${TRANSIT_CONF:-$CONF_DIR}" inbound_tag="${TRANSIT_INBOUND_TAG:-}" auth_user client_uuid imported existing_client_uuid
+  prompt endpoint_file "落地出口 JSON 文件路径" "${ENDPOINT_FILE:-$(first_endpoint_json_file)}"
   [[ ! -f "$endpoint_file" ]] && { err "endpoint 文件不存在：$endpoint_file"; return 1; }
   mkdir -p "$STATE_DIR/endpoints"
   imported="$(core_cmd import-endpoint --state-dir "$STATE_DIR" "$endpoint_file")"
-  info "已导入 endpoint：$imported"
-  prompt conf "sing-box 配置目录或 config.json" "${TRANSIT_CONF:-$CONF_DIR}"
-  prompt inbound_tag "VLESS Reality inbound tag（空则自动选第一个）" "${TRANSIT_INBOUND_TAG:-}"
-  prompt auth_user "客户端 auth_user/users.name" "${TRANSIT_AUTH_USER:-}"
-  if [[ -z "$auth_user" ]]; then
-    auth_user="$(basename "$endpoint_file" .json)"
-  fi
-  prompt client_uuid "客户端 UUID（空则自动生成）" "${TRANSIT_UUID:-}"
+  info "已导入出口：$imported"
+  prompt auth_user "客户端名称" "${TRANSIT_AUTH_USER:-$(basename "$endpoint_file" .json)}"
+  existing_client_uuid="$(vless_user_uuid_from_conf "$conf" "$auth_user")"
+  prompt client_uuid "客户端 UUID" "${TRANSIT_UUID:-${existing_client_uuid:-$(random_uuid)}}"
   local args=(bind-transit --conf "$conf" --endpoint "$endpoint_file" --state-dir "$STATE_DIR" --auth-user "$auth_user")
   [[ -n "$inbound_tag" ]] && args+=(--inbound-tag "$inbound_tag")
   [[ -n "$client_uuid" ]] && args+=(--uuid "$client_uuid")
-  core_cmd "${args[@]}"
+  if ! core_cmd "${args[@]}" >/dev/null; then
+    return 1
+  fi
+  info "出口已绑定：${auth_user}"
   service_check "$conf"
   if [[ "${NO_RESTART:-}" != "1" ]] && confirm "是否现在重启 $SERVICE_NAME" y; then service_restart "$SERVICE_NAME"; fi
 }
@@ -1562,9 +1885,9 @@ transit_import_bind() {
 tg_setup() {
   require_root
   local token chat_id api_base
-  prompt token "Telegram bot token" "${TG_BOT_TOKEN:-}"
-  prompt chat_id "Telegram chat id" "${TG_CHAT_ID:-}"
-  prompt api_base "Telegram API base" "${TG_API_BASE:-https://api.telegram.org}"
+  prompt token "Telegram Bot Token" "${TG_BOT_TOKEN:-}"
+  prompt chat_id "Telegram Chat ID" "${TG_CHAT_ID:-}"
+  prompt api_base "Telegram API 地址" "${TG_API_BASE:-https://api.telegram.org}"
   core_cmd tg-config --state-dir "$STATE_DIR" --bot-token "$token" --chat-id "$chat_id" --api-base "$api_base"
   info "Telegram 配置已写入：$STATE_DIR/telegram.json"
 }
@@ -1593,11 +1916,11 @@ tg_send() { local text="${1:-}"; [[ -z "$text" ]] && prompt text "Telegram messa
 hub_agent_export() {
   local agent_id role name endpoint labels output
   agent_id="${1:-}"
-  [[ -z "$agent_id" ]] && prompt agent_id "agent id" "${AGENT_ID:-$(hostname 2>/dev/null || echo agent)}"
+  [[ -z "$agent_id" ]] && prompt agent_id "节点 ID" "${AGENT_ID:-$(hostname 2>/dev/null || echo agent)}"
   role="${2:-}"
   [[ -z "$role" ]] && select_agent_role role "${AGENT_ROLE:-transit}"
-  prompt name "display name" "${AGENT_NAME:-$agent_id}"
-  prompt endpoint "agent hub endpoint（可留空，推荐未来使用 agent 主动 poll）" "${AGENT_ENDPOINT:-}"
+  prompt name "显示名称" "${AGENT_NAME:-$agent_id}"
+  prompt endpoint "节点回连地址（可留空，默认主动拉取任务）" "${AGENT_ENDPOINT:-}"
   prompt labels "labels，逗号分隔 key=value（可留空）" "${AGENT_LABELS:-}"
   prompt output "输出注册文件路径" "${AGENT_REG_OUTPUT:-${STATE_DIR}/${agent_id}.registration.json}"
   local snapshot_conf=""
@@ -1616,7 +1939,7 @@ hub_agent_export() {
 
 hub_import_agent() {
   local registration="${1:-}"
-  [[ -z "$registration" ]] && prompt registration "agent registration JSON 路径" "${AGENT_REGISTRATION:-}"
+  [[ -z "$registration" ]] && prompt registration "节点注册 JSON 路径" "${AGENT_REGISTRATION:-}"
   core_cmd hub-import-agent --state-dir "$STATE_DIR" "$registration"
 }
 
@@ -1626,7 +1949,7 @@ hub_issue_token() {
     return
   fi
   local agent_id="${1:-}"
-  [[ -z "$agent_id" ]] && prompt agent_id "agent id" "${AGENT_ID:-}"
+  [[ -z "$agent_id" ]] && prompt agent_id "节点 ID" "${AGENT_ID:-}"
   core_cmd hub-issue-token --state-dir "$STATE_DIR" "${@:2}" "$agent_id"
 }
 
@@ -1636,13 +1959,13 @@ hub_rotate_token() {
     return
   fi
   local agent_id="${1:-}"
-  [[ -z "$agent_id" ]] && prompt agent_id "agent id" "${AGENT_ID:-}"
+  [[ -z "$agent_id" ]] && prompt agent_id "节点 ID" "${AGENT_ID:-}"
   core_cmd hub-rotate-token --state-dir "$STATE_DIR" "${@:2}" "$agent_id"
 }
 
 hub_revoke_token() {
   local agent_id="${1:-}"
-  [[ -z "$agent_id" ]] && prompt agent_id "agent id" "${AGENT_ID:-}"
+  [[ -z "$agent_id" ]] && prompt agent_id "节点 ID" "${AGENT_ID:-}"
   shift || true
   core_cmd hub-revoke-token --state-dir "$STATE_DIR" "$@" "$agent_id"
 }
@@ -1662,16 +1985,16 @@ tg_hub_daemon() {
 }
 
 hub_agents() { core_cmd hub-agents --state-dir "$STATE_DIR" "$@"; }
-hub_sync_agent() { local agent_id="${1:-}"; [[ -z "$agent_id" ]] && prompt agent_id "要刷新的 agent id" "${AGENT_ID:-}"; core_cmd hub-sync-agent --state-dir "$STATE_DIR" --agent-id "$agent_id"; }
+hub_sync_agent() { local agent_id="${1:-}"; [[ -z "$agent_id" ]] && prompt agent_id "要刷新的节点 ID" "${AGENT_ID:-}"; core_cmd hub-sync-agent --state-dir "$STATE_DIR" --agent-id "$agent_id"; }
 hub_sync_all() { core_cmd hub-sync-all --state-dir "$STATE_DIR"; }
 hub_export_client() { core_cmd hub-export-client --state-dir "$STATE_DIR" "$@"; }
 hub_export_landing() { core_cmd hub-export-landing --state-dir "$STATE_DIR" "$@"; }
-hub_remove_agent() { local agent_id="${1:-}"; [[ -z "$agent_id" ]] && prompt agent_id "要移除的 agent id" "${AGENT_ID:-}"; shift || true; core_cmd hub-remove-agent --state-dir "$STATE_DIR" "$@" "$agent_id"; }
+hub_remove_agent() { local agent_id="${1:-}"; [[ -z "$agent_id" ]] && prompt agent_id "要移除的节点 ID" "${AGENT_ID:-}"; shift || true; core_cmd hub-remove-agent --state-dir "$STATE_DIR" "$@" "$agent_id"; }
 hub_removed_agents() { core_cmd hub-removed-agents --state-dir "$STATE_DIR" "$@"; }
 hub_decommission_agent() {
   require_root
   local agent_id="${1:-${AGENT_ID:-}}" mode="${DECOMMISSION_MODE:-uninstall}" action="${DECOMMISSION_ACTION:-preview}" text
-  [[ -z "$agent_id" ]] && prompt agent_id "要远程退役的 agent id" ""
+  [[ -z "$agent_id" ]] && prompt agent_id "要远程退役的节点 ID" ""
   select_option mode "退役模式" "$mode" \
     "detach|退出 Hub 托管|删除接入凭证，保留代理配置" \
     "purge-managed-proxy|清理托管代理配置|删除 RelayPilot 代理片段，保留程序" \
@@ -1717,7 +2040,7 @@ hub_enroll_wizard() {
     public_host_locked=1
   fi
   [[ "${HUB_PORT:-}" == "" && -n "$default_port" ]] && port="$default_port"
-  title "Create agent invite"
+  title "生成节点邀请码"
   select_option role "节点角色" "$role" \
     "transit|中转节点|接入用户，转发到落地" \
     "landing|落地节点|提供出口"
@@ -1727,7 +2050,7 @@ hub_enroll_wizard() {
   else
     default_agent_id="transit-$(hostname 2>/dev/null || echo node)"
   fi
-  [[ -z "$agent_id" ]] && prompt agent_id "Agent id（英文数字短横线，例如 ${default_agent_id}）" "$default_agent_id"
+  [[ -z "$agent_id" ]] && prompt agent_id "节点 ID（英文数字短横线，例如 ${default_agent_id}）" "$default_agent_id"
   local input_port
   if [[ "$public_host_locked" == "1" ]]; then
     input_port="$(port_from_host_input "$public_host")"
@@ -1735,11 +2058,11 @@ hub_enroll_wizard() {
     [[ -n "$public_host" ]] && public_host="$(host_only "$public_host")"
     printf "Hub URL： %s%s%s\n" "$BOLD" "https://${public_host}:${port}" "$NC"
   else
-    prompt public_host "Hub 公网 IP/域名（空=自动检测当前公网 IP）" "$public_host"
+    prompt public_host "Hub 访问地址/IP（空则自动检测）" "$public_host"
     input_port="$(port_from_host_input "$public_host")"
     [[ -n "$input_port" ]] && port="$input_port"
     [[ -n "$public_host" ]] && public_host="$(host_only "$public_host")"
-    prompt port "Hub HTTPS 端口" "$port"
+    prompt port "Hub 访问端口" "$port"
   fi
   if ! valid_port "$port"; then
     err "Hub HTTPS 端口必须是 1-65535：$port"
@@ -1776,7 +2099,7 @@ hub_alert_callback() {
     return
   fi
   local data="${1:-}"
-  [[ -z "$data" ]] && prompt data "Telegram callback_data" "${CALLBACK_DATA:-}"
+  [[ -z "$data" ]] && prompt data "Telegram 回调数据" "${CALLBACK_DATA:-}"
   core_cmd hub-alert-callback --state-dir "$STATE_DIR" --data "$data"
 }
 hub_dispatch() { local text="${1:-}"; [[ -z "$text" ]] && prompt text "Hub command text" "/status"; core_cmd hub-dispatch --state-dir "$STATE_DIR" --text "$text"; }
@@ -1792,8 +2115,8 @@ select_hub_agent_by_role() {
   done <<< "$output"
 
   if [[ "${#ids[@]}" -eq 0 ]]; then
-    warn "没有找到 ${label} 节点，请先生成 invite 并让 Agent 连接 Hub。"
-    prompt "$var_name" "${label} agent id" "$default"
+    warn "没有找到${label}节点，请先生成邀请码并让 Agent 接入 Hub。"
+    prompt "$var_name" "${label}节点 ID" "$default"
     return
   fi
 
@@ -1804,11 +2127,11 @@ select_hub_agent_by_role() {
     printf "%2d) %s · %s · %s\n" "$((idx + 1))" "$id" "$name" "$transport"
   done
   if [[ -n "$default" ]]; then
-    printf "选择序号，或输入 agent id [%s%s%s]: " "$BOLD$CYAN" "$default" "$NC"
+    printf "选择序号，或输入节点 ID [%s%s%s]: " "$BOLD$CYAN" "$default" "$NC"
     read -r choice || true
     choice="${choice:-$default}"
   else
-    read -r -p "选择序号，或输入 agent id: " choice || true
+    read -r -p "选择序号，或输入节点 ID: " choice || true
   fi
   if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#ids[@]} )); then
     printf -v "$var_name" '%s' "${ids[$((choice - 1))]}"
@@ -1819,22 +2142,21 @@ select_hub_agent_by_role() {
 
 hub_link_wizard() {
   require_root
-  local transit_id="${TRANSIT_AGENT_ID:-}" landing_id="${LANDING_AGENT_ID:-}" auth_user="${TRANSIT_AUTH_USER:-}" endpoint_name="${ENDPOINT_NAME:-}" inbound_tag="${TRANSIT_INBOUND_TAG:-vless-in}" link_mode="${RELAYPILOT_LINK_MODE:-${LINK_MODE:-direct}}" mesh_cidr="${MESH_CIDR:-}" mesh_port="${MESH_PORT:-}" mesh_endpoint="${MESH_ENDPOINT:-}"
+  local transit_id="${TRANSIT_AGENT_ID:-}" landing_id="${LANDING_AGENT_ID:-}" auth_user="${TRANSIT_AUTH_USER:-}" endpoint_name="${ENDPOINT_NAME:-}" inbound_tag="${TRANSIT_INBOUND_TAG:-}" link_mode="${RELAYPILOT_LINK_MODE:-${LINK_MODE:-direct}}" mesh_cidr="${MESH_CIDR:-}" mesh_port="${MESH_PORT:-}" mesh_endpoint="${MESH_ENDPOINT:-}"
   title "串联中转/落地"
   select_hub_agent_by_role transit_id "transit" "中转" "$transit_id"
   select_hub_agent_by_role landing_id "landing" "落地" "$landing_id"
   select_option link_mode "链路模式" "$link_mode" \
     "direct|直连 TCP|兼容 NAT/禁 UDP，默认推荐" \
     "mesh|自动组网 UDP|WireGuard，需 transit 可发 UDP 且 landing 可收 UDP"
-  prompt auth_user "客户端 auth_user（空=自动用 endpoint 名）" "$auth_user"
-  prompt endpoint_name "落地 endpoint 名（空=自动选第一个）" "$endpoint_name"
-  prompt inbound_tag "中转 Reality inbound tag（默认即可）" "$inbound_tag"
+  prompt auth_user "客户端名称（空=自动）" "$auth_user"
+  prompt endpoint_name "出口名称（空=自动）" "$endpoint_name"
   local text="/link ${transit_id} ${landing_id}"
   [[ -n "$link_mode" ]] && text+=" --mode ${link_mode}"
   if [[ "$link_mode" =~ ^(mesh|auto|overlay|wg|wireguard|自动组网|组网)$ ]]; then
     prompt mesh_cidr "WireGuard /30 网段（空=自动生成）" "$mesh_cidr"
-    prompt mesh_port "Landing WireGuard UDP 端口（空=自动生成）" "$mesh_port"
-    prompt mesh_endpoint "Landing WireGuard 地址:端口（空=沿用落地 endpoint）" "$mesh_endpoint"
+    prompt mesh_port "落地 WireGuard UDP 端口（空=自动生成）" "$mesh_port"
+    prompt mesh_endpoint "落地 WireGuard 地址:端口（空=沿用出口）" "$mesh_endpoint"
     [[ -n "$mesh_cidr" ]] && text+=" --mesh-cidr ${mesh_cidr}"
     [[ -n "$mesh_port" ]] && text+=" --mesh-port ${mesh_port}"
     [[ -n "$mesh_endpoint" ]] && text+=" --mesh-endpoint ${mesh_endpoint}"
@@ -1853,8 +2175,8 @@ agent_poll_once() {
     return
   fi
   local hub_url="${HUB_URL:-}" agent_id="${AGENT_ID:-}" token_file="${AGENT_TOKEN_FILE:-}" role="${AGENT_ROLE:-}" name="${AGENT_NAME:-}" labels="${AGENT_LABELS:-}" conf="${AGENT_CONF:-$CONF_DIR}" ca_cert="${AGENT_CA_CERT:-}" client_cert="${AGENT_CLIENT_CERT:-}" client_key="${AGENT_CLIENT_KEY:-}" tls_server_name="${AGENT_TLS_SERVER_NAME:-}" ip_mode="${AGENT_IP_MODE:-}" public_ip_interval="${AGENT_PUBLIC_IP_INTERVAL:-}"
-  [[ -z "$hub_url" ]] && prompt hub_url "Hub API URL" "http://127.0.0.1:8080"
-  [[ -z "$agent_id" ]] && prompt agent_id "agent id" "$(hostname 2>/dev/null || echo agent)"
+  [[ -z "$hub_url" ]] && prompt hub_url "Hub URL" "http://127.0.0.1:8080"
+  [[ -z "$agent_id" ]] && prompt agent_id "节点 ID" "$(hostname 2>/dev/null || echo agent)"
   [[ -z "$role" ]] && select_agent_role role "transit"
   local args=(--hub-url "$hub_url" --agent-id "$agent_id" --role "$role" --state-dir "$STATE_DIR" --conf "$conf")
   [[ -n "$name" ]] && args+=(--name "$name")
@@ -1868,7 +2190,7 @@ agent_poll_once() {
   if [[ -n "$token_file" ]]; then
     args+=(--token-file "$token_file")
   elif [[ -z "${AGENT_TOKEN:-}" ]]; then
-    prompt token_file "agent token file" "${STATE_DIR}/agent-token"
+    prompt token_file "节点 token 文件" "${STATE_DIR}/agent-token"
     args+=(--token-file "$token_file")
   fi
   core_cmd agent-poll-once "${args[@]}"
@@ -1880,8 +2202,8 @@ agent_poll_loop() {
     return
   fi
   local hub_url="${HUB_URL:-}" agent_id="${AGENT_ID:-}" token_file="${AGENT_TOKEN_FILE:-}" role="${AGENT_ROLE:-}" name="${AGENT_NAME:-}" labels="${AGENT_LABELS:-}" conf="${AGENT_CONF:-$CONF_DIR}" interval="${AGENT_POLL_INTERVAL:-30}" topology_interval="${AGENT_TOPOLOGY_INTERVAL:-300}" ca_cert="${AGENT_CA_CERT:-}" client_cert="${AGENT_CLIENT_CERT:-}" client_key="${AGENT_CLIENT_KEY:-}" tls_server_name="${AGENT_TLS_SERVER_NAME:-}" ip_mode="${AGENT_IP_MODE:-}" public_ip_interval="${AGENT_PUBLIC_IP_INTERVAL:-}"
-  [[ -z "$hub_url" ]] && prompt hub_url "Hub API URL" "http://127.0.0.1:8080"
-  [[ -z "$agent_id" ]] && prompt agent_id "agent id" "$(hostname 2>/dev/null || echo agent)"
+  [[ -z "$hub_url" ]] && prompt hub_url "Hub URL" "http://127.0.0.1:8080"
+  [[ -z "$agent_id" ]] && prompt agent_id "节点 ID" "$(hostname 2>/dev/null || echo agent)"
   [[ -z "$role" ]] && select_agent_role role "transit"
   local args=(--hub-url "$hub_url" --agent-id "$agent_id" --role "$role" --state-dir "$STATE_DIR" --conf "$conf" --interval "$interval" --topology-interval "$topology_interval")
   [[ -n "$name" ]] && args+=(--name "$name")
@@ -1895,7 +2217,7 @@ agent_poll_loop() {
   if [[ -n "$token_file" ]]; then
     args+=(--token-file "$token_file")
   elif [[ -z "${AGENT_TOKEN:-}" ]]; then
-    prompt token_file "agent token file" "${STATE_DIR}/agent-token"
+    prompt token_file "节点 token 文件" "${STATE_DIR}/agent-token"
     args+=(--token-file "$token_file")
   fi
   core_cmd agent-poll-loop "${args[@]}"
@@ -1930,10 +2252,10 @@ install_agent_service() {
     return 1
   fi
   if [[ -z "$enrollment_file" ]]; then
-    [[ -z "$hub_url" ]] && prompt hub_url "Hub API URL" "http://127.0.0.1:8080"
-    [[ -z "$agent_id" ]] && prompt agent_id "agent id" "$(hostname 2>/dev/null || echo agent)"
+    [[ -z "$hub_url" ]] && prompt hub_url "Hub URL" "http://127.0.0.1:8080"
+    [[ -z "$agent_id" ]] && prompt agent_id "节点 ID" "$(hostname 2>/dev/null || echo agent)"
     [[ -z "$role" ]] && select_agent_role role "transit"
-    [[ -z "$token_file" ]] && prompt token_file "agent token file" "${STATE_DIR}/agent-token"
+    [[ -z "$token_file" ]] && prompt token_file "节点 token 文件" "${STATE_DIR}/agent-token"
   fi
   prepare_service_profile
   local exec_cmd
@@ -2116,28 +2438,28 @@ hub_quick_setup() {
   [[ "${HUB_PORT:-}" == "" && -n "$saved_port" ]] && port="$saved_port"
   [[ "${HUB_LISTEN_HOST:-}" == "" && -n "$saved_listen_host" ]] && listen_host="$saved_listen_host"
   local detected="" tls_args=()
-  title "Hub HTTPS/mTLS quick setup"
+  title "初始化 Hub"
   if [[ -z "$public_host" ]]; then
     detected="$(detect_public_ip || true)"
   fi
-  prompt public_host "Hub public IP/domain used by agents (empty = detected current IP)" "${public_host:-$detected}"
-  [[ -z "$public_host" ]] && { err "需要 Hub public IP/domain；也可以稍后运行 hub-init-tls --host <IP_OR_DOMAIN>。"; return 1; }
+  prompt public_host "Hub 访问地址/IP（空则自动检测）" "${public_host:-$detected}"
+  [[ -z "$public_host" ]] && { err "需要 Hub 访问地址/IP；也可以稍后运行 hub-init-tls --host <IP_OR_DOMAIN>。"; return 1; }
   local input_port cert_host public_host_for_url
   input_port="$(port_from_host_input "$public_host")"
   [[ -n "$input_port" ]] && port="$input_port"
   cert_host="$(host_only "$public_host")"
   public_host_for_url="$(url_host "$public_host")"
-  prompt port "Hub HTTPS port" "$port"
+  prompt port "Hub 访问端口" "$port"
   if ! valid_port "$port"; then
-    err "Hub HTTPS port 必须是 1-65535：$port"
+    err "Hub 访问端口必须是 1-65535：$port"
     return 1
   fi
-  prompt listen_host "Hub listen address" "$listen_host"
+  prompt listen_host "Hub 本地地址/IP" "$listen_host"
   [[ -z "$listen_host" ]] && listen_host="0.0.0.0"
 
   title "Hub 配置预览"
   printf "  Hub URL：      https://%s:%s\n" "$public_host_for_url" "$port"
-  printf "  监听地址：     %s:%s\n" "$listen_host" "$port"
+  printf "  本地监听：     %s:%s\n" "$listen_host" "$port"
   printf "  证书 SAN：     %s\n" "$cert_host"
   printf "  状态目录：     %s\n" "$STATE_DIR"
   printf "  systemd 服务： %s\n" "$HUB_SERVICE_NAME"
@@ -2169,7 +2491,7 @@ hub_quick_setup() {
   save_hub_public_config "$public_host_for_url" "$cert_host" "$port" "$listen_host"
   echo
   info "Hub URL 给 agent 使用：https://${public_host_for_url}:${port}"
-  info "继续：在 Hub 菜单生成 agent invite；agent 端粘贴 invite 即可连接。"
+  info "继续：在 Hub 菜单生成节点邀请码；Agent 端粘贴邀请码即可连接。"
   if confirm "是否现在启动 ${HUB_SERVICE_NAME}" y; then
     if service_action "$HUB_SERVICE_NAME" restart; then
       if command -v systemctl >/dev/null 2>&1 && ! systemctl is-active --quiet "$HUB_SERVICE_NAME"; then
@@ -2198,11 +2520,11 @@ agent_join_wizard() {
   done
   title "Agent 模式"
   if [[ -z "$invite" ]]; then
-    prompt invite "invite" ""
+    prompt invite "Hub 邀请码" ""
   else
     info "已读取 Hub invite。"
   fi
-  [[ -z "$invite" ]] && { warn "invite 为空。"; return 0; }
+  [[ -z "$invite" ]] && { warn "邀请码为空。"; return 0; }
   select_ip_mode ip_mode "$ip_mode"
   ip_check_seconds="${ip_check_seconds:-${AGENT_PUBLIC_IP_INTERVAL:-600}}"
   if [[ "$ip_mode" == "dynamic" ]]; then
@@ -2287,7 +2609,25 @@ agent_ip_mode_wizard() {
 
 show_agent_enrollment() {
   if [[ -f "${STATE_DIR}/agent-enrollment.json" ]]; then
-    cat "${STATE_DIR}/agent-enrollment.json"
+    local hub_url agent_id role_label token_file ca_cert client_cert client_key ip_mode interval
+    hub_url="$(agent_enrollment_value hub_url)"
+    agent_id="$(agent_enrollment_value agent_id)"
+    role_label="$(agent_role_label)"
+    token_file="$(agent_enrollment_value token_file)"
+    ca_cert="$(agent_enrollment_value ca_cert)"
+    client_cert="$(agent_enrollment_value client_cert)"
+    client_key="$(agent_enrollment_value client_key)"
+    ip_mode="$(agent_enrollment_value ip_mode)"
+    interval="$(agent_enrollment_number public_ip_interval_seconds)"
+    printf "Hub：%s\n" "${hub_url:-未配置}"
+    printf "Agent ID：%s\n" "${agent_id:-未配置}"
+    printf "角色：%s\n" "${role_label:-Agent}"
+    [[ -n "$ip_mode" ]] && printf "IP 模式：%s\n" "$ip_mode"
+    [[ -n "$interval" ]] && printf "公网 IP 检测间隔：%s 秒\n" "$interval"
+    [[ -n "$token_file" ]] && printf "Token 文件：%s\n" "$token_file"
+    [[ -n "$ca_cert" ]] && printf "CA 证书：%s\n" "$ca_cert"
+    [[ -n "$client_cert" ]] && printf "客户端证书：%s\n" "$client_cert"
+    [[ -n "$client_key" ]] && printf "客户端私钥：%s\n" "$client_key"
   else
     warn "Agent 尚未连接 Hub。"
   fi
@@ -2298,11 +2638,7 @@ agent_enrolled() {
 }
 
 agent_role_config_label() {
-  case "$(agent_enrollment_role)" in
-    transit) printf '中转节点' ;;
-    landing) printf '落地节点' ;;
-    *) printf '本机代理配置' ;;
-  esac
+  printf '代理配置'
 }
 
 agent_role_config_menu() {
@@ -2311,7 +2647,7 @@ agent_role_config_menu() {
     landing) landing_menu ;;
     *)
       while true; do
-        menu_title "本机代理配置"
+        menu_title "代理配置"
         menu_item 1 "配置中转 Reality"
         menu_item 2 "配置落地出口"
         menu_back
@@ -2386,19 +2722,38 @@ agent_remote_decommission_policy_menu() {
   done
 }
 
+agent_network_menu() {
+  require_root
+  while true; do
+    menu_title "Agent 网络设置"
+    menu_item 1 "IP 模式"
+    menu_item 2 "公网入口"
+    menu_back
+    menu_prompt choice "0-2"
+    case "${choice:-}" in
+      1) menu_action agent_ip_mode_wizard ;;
+      2) public_entry_menu ;;
+      0) return 0 ;;
+      *) menu_invalid_choice ;;
+    esac
+  done
+}
+
 agent_advanced_menu() {
   require_root
   while true; do
     menu_title "Agent 高级操作"
-    menu_item 1 "远程退役授权"
-    menu_item 2 "退出 Hub 托管"
-    menu_item 3 "重置 Agent"
+    menu_item 1 "Hub 接入信息"
+    menu_item 2 "远程退役授权"
+    menu_item 3 "退出 Hub 托管"
+    menu_item 4 "重置 Agent"
     menu_back
-    menu_prompt choice "0-3"
+    menu_prompt choice "0-4"
     case "${choice:-}" in
-      1) agent_remote_decommission_policy_menu ;;
-      2) menu_action reset_agent_control_menu_action ;;
-      3) menu_action reset_agent_menu_action ;;
+      1) menu_action show_agent_enrollment ;;
+      2) agent_remote_decommission_policy_menu ;;
+      3) menu_action reset_agent_control_menu_action ;;
+      4) menu_action reset_agent_menu_action ;;
       0) return 0 ;;
       *) menu_invalid_choice ;;
     esac
@@ -2412,14 +2767,14 @@ agent_unenrolled_menu() {
     printf "  Agent 尚未接入 Hub。\n"
     echo
     menu_item 1 "接入 Hub"
-    menu_item 2 "配置中转 Reality"
-    menu_item 3 "配置落地出口"
+    menu_item 2 "代理配置"
+    menu_item 3 "连接信息"
     menu_back
     menu_prompt choice "0-3"
     case "${choice:-}" in
       1) menu_action agent_join_wizard ;;
-      2) menu_action transit_init_reality ;;
-      3) landing_menu ;;
+      2) agent_role_config_menu ;;
+      3) menu_action connection_info ;;
       0) return 0 ;;
       *) menu_invalid_choice ;;
     esac
@@ -2441,20 +2796,18 @@ agent_mode_menu() {
     printf "  Agent 已接入：%s · %s\n" "${agent_id:-unknown}" "${role_label:-Agent}"
     echo
     menu_item 1 "$config_label"
-    menu_item 2 "接入信息"
-    menu_item 3 "IP 模式"
-    menu_item 4 "公网入口"
-    menu_item 5 "Agent 服务"
-    menu_item 6 "高级操作"
+    menu_item 2 "连接信息"
+    menu_item 3 "网络设置"
+    menu_item 4 "Agent 服务"
+    menu_item 5 "高级操作"
     menu_back
-    menu_prompt choice "0-6"
+    menu_prompt choice "0-5"
     case "${choice:-}" in
       1) agent_role_config_menu ;;
-      2) menu_action show_agent_enrollment ;;
-      3) menu_action agent_ip_mode_wizard ;;
-      4) public_entry_menu ;;
-      5) service_control_menu "$AGENT_SERVICE_NAME" "Agent 服务" ;;
-      6) agent_advanced_menu ;;
+      2) menu_action connection_info ;;
+      3) agent_network_menu ;;
+      4) service_control_menu "$AGENT_SERVICE_NAME" "Agent 服务" ;;
+      5) agent_advanced_menu ;;
       0) return 0 ;;
       *) menu_invalid_choice ;;
     esac
@@ -2560,10 +2913,10 @@ service_enabled_label() {
 menu_color_status() {
   local value="$1"
   case "$value" in
-    运行中|开机启动) printf '%s%s● %s%s' "$BOLD" "$GREEN" "$value" "$NC" ;;
-    失败|异常) printf '%s%s✕ %s%s' "$BOLD" "$RED" "$value" "$NC" ;;
-    处理中|混合部署) printf '%s%s● %s%s' "$BOLD" "$YELLOW" "$value" "$NC" ;;
-    未启用|未安装|未运行|未知) printf '%s○ %s%s' "$DIM" "$value" "$NC" ;;
+    *运行中|*开机启动) printf '%s%s● %s%s' "$BOLD" "$GREEN" "$value" "$NC" ;;
+    *失败|*异常) printf '%s%s✕ %s%s' "$BOLD" "$RED" "$value" "$NC" ;;
+    *处理中|*混合部署) printf '%s%s● %s%s' "$BOLD" "$YELLOW" "$value" "$NC" ;;
+    *未启用|*未安装|*未运行|*未知) printf '%s○ %s%s' "$DIM" "$value" "$NC" ;;
     *) printf '%s' "$value" ;;
   esac
 }
@@ -2578,10 +2931,90 @@ agent_role_label() {
   esac
 }
 
+proxy_config_present() {
+  [[ -f "$SINGBOX_CONFIG_PATH" ]] && return 0
+  if [[ -d "$CONF_DIR" ]]; then
+    find "$CONF_DIR" -maxdepth 1 -type f -name '*relaypilot*.json' -print -quit 2>/dev/null | grep -q .
+  else
+    return 1
+  fi
+}
+
+proxy_present() {
+  service_unit_installed "$SERVICE_NAME" && return 0
+  proxy_config_present
+}
+
+append_unique_value() {
+  local var_name="$1" candidate="$2" existing
+  [[ -n "$candidate" ]] || return 0
+  eval "existing=\" \${${var_name}[*]:-} \""
+  if [[ "$existing" != *" $candidate "* ]]; then
+    eval "${var_name}+=(\"\$candidate\")"
+  fi
+}
+
+collect_proxy_types_from_file() {
+  local file="$1" var_name="$2"
+  [[ -f "$file" ]] || return 0
+  if grep -Eq '"(protocol|type)"[[:space:]]*:[[:space:]]*"socks"' "$file"; then
+    append_unique_value "$var_name" "SOCKS5"
+  fi
+  if grep -Eq '"(protocol|type)"[[:space:]]*:[[:space:]]*"shadowsocks"' "$file"; then
+    append_unique_value "$var_name" "Shadowsocks"
+  fi
+  if grep -Eq '"(protocol|type)"[[:space:]]*:[[:space:]]*"wireguard"' "$file"; then
+    append_unique_value "$var_name" "WireGuard"
+  fi
+  if grep -Eq '"type"[[:space:]]*:[[:space:]]*"vless"|"reality"' "$file"; then
+    append_unique_value "$var_name" "Reality"
+  fi
+}
+
+proxy_type_summary() {
+  local types=() file
+  if [[ -d "${STATE_DIR}/endpoints" ]]; then
+    while IFS= read -r -d '' file; do
+      collect_proxy_types_from_file "$file" types
+    done < <(find "${STATE_DIR}/endpoints" -maxdepth 1 -type f -name '*.json' -print0 2>/dev/null || true)
+  fi
+  collect_proxy_types_from_file "$SINGBOX_CONFIG_PATH" types
+  if [[ -d "$CONF_DIR" ]]; then
+    while IFS= read -r -d '' file; do
+      collect_proxy_types_from_file "$file" types
+    done < <(find "$CONF_DIR" -maxdepth 1 -type f -name '*relaypilot*.json' -print0 2>/dev/null || true)
+  fi
+  if (( ${#types[@]} > 0 )); then
+    local IFS='/'
+    printf '%s' "${types[*]}"
+  fi
+}
+
+proxy_status_label() {
+  local status summary
+  if service_unit_installed "$SERVICE_NAME"; then
+    status="$(service_active_label "$SERVICE_NAME")"
+  elif proxy_config_present; then
+    status="未安装"
+  else
+    status="未启用"
+  fi
+  summary="$(proxy_type_summary)"
+  if [[ -z "$summary" && "$status" != "未启用" ]]; then
+    summary="sing-box"
+  fi
+  if [[ -n "$summary" && "$status" != "未启用" ]]; then
+    printf '%s %s' "$summary" "$status"
+  else
+    printf '%s' "$status"
+  fi
+}
+
 machine_mode_label() {
-  local hub_present=0 agent_present=0 role_label
+  local hub_present=0 agent_present=0 proxy_present_flag=0 role_label
   service_unit_installed "$HUB_SERVICE_NAME" && hub_present=1
   service_unit_installed "$AGENT_SERVICE_NAME" && agent_present=1
+  proxy_present && proxy_present_flag=1
   [[ -f "${STATE_DIR}/agent-enrollment.json" ]] && agent_present=1
   role_label="$(agent_role_label)"
   if [[ "$hub_present" == "1" && "$agent_present" == "1" ]]; then
@@ -2598,31 +3031,49 @@ machine_mode_label() {
     else
       printf 'Agent'
     fi
+  elif [[ "$proxy_present_flag" == "1" ]]; then
+    printf '本机代理'
   else
     printf '未配置'
   fi
 }
 
 menu_status_line() {
-  local hub agent proxy agent_present=0
-  [[ -f "${STATE_DIR}/agent-enrollment.json" ]] && agent_present=1
-  service_unit_installed "$AGENT_SERVICE_NAME" && agent_present=1
+  local hub agent proxy
   if service_unit_installed "$HUB_SERVICE_NAME"; then
     hub="$(service_active_label "$HUB_SERVICE_NAME")"
   else
     hub="未启用"
   fi
-  if [[ "$agent_present" == "1" ]]; then
-    agent="$(service_active_label "$AGENT_SERVICE_NAME")"
-    proxy="$(service_active_label "$SERVICE_NAME")"
-  else
-    agent="未启用"
-    proxy="未启用"
-  fi
+  agent="$(agent_status_label)"
+  proxy="$(proxy_status_label)"
   printf '%sHub：%s%s   %sAgent：%s%s   %s代理：%s%s' \
     "$DIM" "$NC" "$(menu_color_status "$hub")" \
     "$DIM" "$NC" "$(menu_color_status "$agent")" \
     "$DIM" "$NC" "$(menu_color_status "$proxy")"
+}
+
+agent_status_label() {
+  local service_status
+  if agent_enrolled; then
+    if service_unit_installed "$AGENT_SERVICE_NAME"; then
+      service_status="$(service_active_label "$AGENT_SERVICE_NAME")"
+      case "$service_status" in
+        运行中) printf '已接入/运行中' ;;
+        未运行) printf '已接入/服务未运行' ;;
+        未安装) printf '已接入/服务未安装' ;;
+        *) printf '已接入/%s' "$service_status" ;;
+      esac
+    else
+      printf '已接入/服务未安装'
+    fi
+    return
+  fi
+  if service_unit_installed "$AGENT_SERVICE_NAME"; then
+    service_active_label "$AGENT_SERVICE_NAME"
+  else
+    printf '未启用'
+  fi
 }
 
 menu_title() {
@@ -2669,8 +3120,15 @@ service_control_menu() {
   local name="$1" label="$2"
   while true; do
     menu_title "$label"
+    local start_label="启动"
+    if [[ "$name" == "$AGENT_SERVICE_NAME" ]] && agent_enrolled && ! service_unit_installed "$AGENT_SERVICE_NAME"; then
+      printf "  Agent 已接入 Hub，但后台服务未安装。\n"
+      printf "  选择“安装/修复”会创建 %s 并开始轮询 Hub。\n" "$AGENT_SERVICE_NAME"
+      echo
+      start_label="安装/修复 Agent 服务"
+    fi
     menu_item 1 "状态"
-    menu_item 2 "启动"
+    menu_item 2 "$start_label"
     menu_item 3 "重启"
     menu_item 4 "停止"
     menu_item 5 "日志"
@@ -2678,7 +3136,13 @@ service_control_menu() {
     menu_prompt choice "0-5"
     case "${choice:-}" in
       1) menu_action service_action "$name" status ;;
-      2) menu_action service_action "$name" start ;;
+      2)
+        if [[ "$name" == "$AGENT_SERVICE_NAME" ]] && agent_enrolled && ! service_unit_installed "$AGENT_SERVICE_NAME"; then
+          menu_action install_agent_service --enrollment-file "${STATE_DIR}/agent-enrollment.json"
+        else
+          menu_action service_action "$name" start
+        fi
+        ;;
       3) menu_action service_action "$name" restart ;;
       4) menu_action service_action "$name" stop ;;
       5)
@@ -3053,25 +3517,96 @@ uninstall_relaypilot_menu() {
 main_menu() {
   require_root
   while true; do
-    menu_title "RelayPilot"
-    menu_item 1 "Hub 模式"
-    menu_item 2 "Agent 模式"
-    menu_item 3 "本机服务"
-    menu_item 4 "卸载 RelayPilot"
+    menu_title "RelayPilot 安装"
+    menu_item 1 "安装/进入 Hub"
+    menu_item 2 "安装/进入 Agent"
+    menu_item 3 "卸载 RelayPilot"
     menu_back "退出"
-    menu_prompt choice "0-4"
+    menu_prompt choice "0-3"
     case "${choice:-}" in
-      1) hub_menu ;;
-      2) agent_mode_menu ;;
-      3) services_menu ;;
-      4) uninstall_relaypilot_menu ;;
+      1) hub_install_wizard ;;
+      2) agent_install_wizard ;;
+      3) uninstall_relaypilot_menu ;;
       0) exit 0 ;;
       *) menu_invalid_choice ;;
     esac
   done
 }
 
+hub_install_wizard() {
+  require_root
+  if ! hub_initialized; then
+    hub_quick_setup
+  fi
+  hub_initialized && hub_menu
+}
+
+agent_install_wizard() {
+  require_root
+  if agent_enrolled; then
+    agent_mode_menu
+    return
+  fi
+  local invite="${AGENT_INVITE:-}"
+  title "安装/接入 Agent"
+  prompt invite "Hub 邀请码（留空=单机模式）" "$invite"
+  if [[ -n "$invite" ]]; then
+    agent_join_wizard --invite "$invite"
+    agent_enrolled && agent_mode_menu
+    return
+  fi
+  info "已跳过 Hub 接入，进入单机 Agent 面板。"
+  agent_mode_menu
+}
+
+hub_applet_main() {
+  case "${1:-menu}" in
+    menu|interactive|"") shift || true; menu_session hub_menu "$@" ;;
+    install) shift; hub_install_wizard "$@" ;;
+    setup|quick-setup|init) shift; hub_quick_setup "$@" ;;
+    invite|enroll) shift; hub_enroll_wizard "$@" ;;
+    link) shift; hub_link_wizard "$@" ;;
+    agents) shift; hub_agents "$@" ;;
+    status) shift; hub_dispatch "/status" ;;
+    dispatch) shift; hub_dispatch "${1:-}" ;;
+    telegram|tg) shift; menu_session hub_telegram_menu "$@" ;;
+    service|services) shift; menu_session service_control_menu "$HUB_SERVICE_NAME" "Hub 服务" ;;
+    advanced) shift; menu_session hub_advanced_menu "$@" ;;
+    update|self-update|upgrade) shift; self_update "$@" ;;
+    uninstall) shift; uninstall_self "$@" ;;
+    doctor) doctor ;;
+    -h|--help|help) usage ;;
+    *) err "未知 Hub 命令：${1:-}"; usage; exit 1 ;;
+  esac
+}
+
+agent_applet_main() {
+  case "${1:-menu}" in
+    menu|interactive|"") shift || true; menu_session agent_mode_menu "$@" ;;
+    install|setup|init) shift; agent_install_wizard "$@" ;;
+    service|services) shift; menu_session service_control_menu "$AGENT_SERVICE_NAME" "Agent 服务" ;;
+    update|self-update|upgrade) shift; self_update "$@" ;;
+    uninstall) shift; uninstall_self "$@" ;;
+    doctor) doctor ;;
+    -h|--help|help) usage ;;
+    *)
+      local old_invoked="$INVOKED_NAME"
+      INVOKED_NAME="relaypilot"
+      main agent "$@"
+      INVOKED_NAME="$old_invoked"
+      ;;
+  esac
+}
+
 main() {
+  if [[ "$INVOKED_NAME" == "relaypilot-hub" ]]; then
+    hub_applet_main "$@"
+    return
+  fi
+  if [[ "$INVOKED_NAME" == "relaypilot-agent" ]]; then
+    agent_applet_main "$@"
+    return
+  fi
   if [[ "${1:-}" == "bot" ]]; then
     shift
     case "${1:-}" in
@@ -3107,6 +3642,7 @@ main() {
           *) err "未知远程退役授权命令：${1:-}"; exit 1 ;;
         esac
         ;;
+      connection-info|connect-info|client-info) shift; connection_info "${1:-}" ;;
       public-entry|entry) shift; menu_session public_entry_menu "$@" ;;
       poll-once) shift; agent_poll_once "$@" ;;
       poll|poll-loop) shift; agent_poll_loop "$@" ;;
@@ -3173,6 +3709,7 @@ main() {
     migrate-state) shift; migrate_state "$@" ;;
     import-endpoint) shift; core_cmd import-endpoint --state-dir "$STATE_DIR" "$@" ;;
     export-endpoint) shift; core_cmd export-endpoint --state-dir "$STATE_DIR" "$@" ;;
+    connection-info|connect-info|client-info) shift; connection_info "${1:-}" ;;
     public-entry-set) shift; public_entry_set "$@" ;;
     public-entry-list) shift; public_entry_list "$@" ;;
     public-entry|entry) shift; menu_session public_entry_menu "$@" ;;
