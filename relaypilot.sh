@@ -1208,11 +1208,81 @@ service_check() {
 }
 
 install_cli_links() {
-  local script_dest="$1"
-  mkdir -p "$(dirname "$BIN_PATH")" "$(dirname "$HUB_BIN_PATH")" "$(dirname "$AGENT_BIN_PATH")"
+  local script_dest="$1" role
+  shift || true
+  mkdir -p "$(dirname "$BIN_PATH")"
   ln -sf "$script_dest" "$BIN_PATH"
-  ln -sf "$script_dest" "$HUB_BIN_PATH"
-  ln -sf "$script_dest" "$AGENT_BIN_PATH"
+  for role in "$@"; do
+    case "$role" in
+      hub)
+        mkdir -p "$(dirname "$HUB_BIN_PATH")"
+        ln -sf "$script_dest" "$HUB_BIN_PATH"
+        ;;
+      agent)
+        mkdir -p "$(dirname "$AGENT_BIN_PATH")"
+        ln -sf "$script_dest" "$AGENT_BIN_PATH"
+        ;;
+    esac
+  done
+}
+
+safe_remove_role_link() {
+  local path="$1" target
+  [[ -L "$path" ]] || return 0
+  target="$(readlink "$path" 2>/dev/null || true)"
+  case "$target" in
+    "$INSTALL_DIR/relaypilot.sh"|"$INSTALL_DIR"/relaypilot.sh|*/relaypilot.sh)
+      rm -f "$path"
+      ;;
+  esac
+}
+
+hub_entrypoint_wanted() {
+  [[ "$INVOKED_NAME" == "relaypilot-hub" ]] && return 0
+  service_unit_installed "$HUB_SERVICE_NAME" && return 0
+  hub_initialized && return 0
+  return 1
+}
+
+agent_entrypoint_wanted() {
+  [[ "$INVOKED_NAME" == "relaypilot-agent" ]] && return 0
+  service_unit_installed "$AGENT_SERVICE_NAME" && return 0
+  agent_enrolled && return 0
+  proxy_present && return 0
+  return 1
+}
+
+install_role_entrypoint() {
+  local role="$1" script_dest="${2:-$INSTALL_DIR/relaypilot.sh}" path current=""
+  [[ -f "$script_dest" ]] || return 0
+  case "$role" in
+    hub) path="$HUB_BIN_PATH" ;;
+    agent) path="$AGENT_BIN_PATH" ;;
+    *) return 0 ;;
+  esac
+  [[ -L "$path" ]] && current="$(readlink "$path" 2>/dev/null || true)"
+  install_cli_links "$script_dest" "$role"
+  [[ "$current" == "$script_dest" ]] && return 0
+  case "$role" in
+    hub) info "Hub 面板：$HUB_BIN_PATH" ;;
+    agent) info "Agent 面板：$AGENT_BIN_PATH" ;;
+  esac
+}
+
+install_detected_cli_links() {
+  local script_dest="$1" roles=()
+  if hub_entrypoint_wanted; then
+    roles+=(hub)
+  else
+    safe_remove_role_link "$HUB_BIN_PATH"
+  fi
+  if agent_entrypoint_wanted; then
+    roles+=(agent)
+  else
+    safe_remove_role_link "$AGENT_BIN_PATH"
+  fi
+  install_cli_links "$script_dest" "${roles[@]}"
+  printf '%s\n' "${roles[@]}"
 }
 
 install_self() {
@@ -1236,8 +1306,8 @@ install_self() {
   install_cli_links "$INSTALL_DIR/relaypilot.sh"
   info "已安装到：$INSTALL_DIR"
   info "CLI：$BIN_PATH"
-  info "Hub 面板：$HUB_BIN_PATH"
-  info "Agent 面板：$AGENT_BIN_PATH"
+  info "需要 Hub 时运行：relaypilot hub"
+  info "需要 Agent 时运行：relaypilot agent"
 }
 
 self_update() {
@@ -1304,7 +1374,7 @@ self_update() {
     warn "未找到 sha256 文件，跳过校验。"
   fi
 
-  mkdir -p "$INSTALL_DIR/bin" "$(dirname "$BIN_PATH")" "$(dirname "$HUB_BIN_PATH")" "$(dirname "$AGENT_BIN_PATH")"
+  mkdir -p "$INSTALL_DIR/bin" "$(dirname "$BIN_PATH")"
   [[ -f "$INSTALL_DIR/relaypilot.sh" ]] && cp -a "$INSTALL_DIR/relaypilot.sh" "$INSTALL_DIR/relaypilot.sh.prev"
   [[ -f "$INSTALL_DIR/bin/relaypilot" ]] && cp -a "$INSTALL_DIR/bin/relaypilot" "$INSTALL_DIR/bin/relaypilot.prev"
   local script_dest core_dest script_new core_new
@@ -1318,13 +1388,18 @@ self_update() {
   chmod +x "$script_new" "$core_new"
   mv -f "$script_new" "$script_dest"
   mv -f "$core_new" "$core_dest"
-  install_cli_links "$script_dest"
+  local updated_roles
+  updated_roles="$(install_detected_cli_links "$script_dest" || true)"
   rm -rf "$tmp"
   unset RELAYPILOT_UPDATE_TMP
 
   info "已更新 RelayPilot：$BIN_PATH"
-  info "Hub 面板：$HUB_BIN_PATH"
-  info "Agent 面板：$AGENT_BIN_PATH"
+  if grep -qx 'hub' <<<"$updated_roles"; then
+    info "Hub 面板：$HUB_BIN_PATH"
+  fi
+  if grep -qx 'agent' <<<"$updated_roles"; then
+    info "Agent 面板：$AGENT_BIN_PATH"
+  fi
   "$INSTALL_DIR/bin/relaypilot" version || true
 
   if [[ "$restart_services" == "ask" ]]; then
@@ -3535,6 +3610,7 @@ main_menu() {
 
 hub_install_wizard() {
   require_root
+  install_role_entrypoint hub
   if ! hub_initialized; then
     hub_quick_setup
   fi
@@ -3543,6 +3619,7 @@ hub_install_wizard() {
 
 agent_install_wizard() {
   require_root
+  install_role_entrypoint agent
   if agent_enrolled; then
     agent_mode_menu
     return
@@ -3560,6 +3637,7 @@ agent_install_wizard() {
 }
 
 hub_applet_main() {
+  install_role_entrypoint hub
   case "${1:-menu}" in
     menu|interactive|"") shift || true; menu_session hub_menu "$@" ;;
     install) shift; hub_install_wizard "$@" ;;
@@ -3581,6 +3659,7 @@ hub_applet_main() {
 }
 
 agent_applet_main() {
+  install_role_entrypoint agent
   case "${1:-menu}" in
     menu|interactive|"") shift || true; menu_session agent_mode_menu "$@" ;;
     install|setup|init) shift; agent_install_wizard "$@" ;;
@@ -3625,6 +3704,7 @@ main() {
   fi
   if [[ "${1:-}" == "agent" ]]; then
     shift
+    install_role_entrypoint agent
     case "${1:-}" in
       enroll) shift; agent_enroll "$@" ;;
       join) shift; agent_join_wizard "$@" ;;
@@ -3656,7 +3736,7 @@ main() {
     menu|interactive) menu_session main_menu ;;
     landing) menu_session landing_menu ;;
     transit) menu_session transit_menu ;;
-    hub) menu_session hub_menu ;;
+    hub) shift; hub_applet_main "$@" ;;
     telegram|tg) menu_session telegram_menu ;;
     landing-install-ss) landing_install_ss ;;
     landing-install-socks) landing_install_socks ;;

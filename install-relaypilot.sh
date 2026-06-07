@@ -79,25 +79,35 @@ else
   exit 1
 fi
 
-mkdir -p "$(dirname "$BIN_PATH")" "$(dirname "$HUB_BIN_PATH")" "$(dirname "$AGENT_BIN_PATH")"
+mkdir -p "$(dirname "$BIN_PATH")"
 ln -sf "$INSTALL_DIR/relaypilot.sh" "$BIN_PATH"
-ln -sf "$INSTALL_DIR/relaypilot.sh" "$HUB_BIN_PATH"
-ln -sf "$INSTALL_DIR/relaypilot.sh" "$AGENT_BIN_PATH"
 echo "Installed entrypoint: $BIN_PATH"
-echo "Installed Hub entrypoint: $HUB_BIN_PATH"
-echo "Installed Agent entrypoint: $AGENT_BIN_PATH"
-echo "Run: relaypilot-hub    # Hub 面板"
-echo "Run: relaypilot-agent  # Agent 面板"
 echo "Run: relaypilot        # 总面板"
+
+install_hub_entrypoint() {
+  mkdir -p "$(dirname "$HUB_BIN_PATH")"
+  ln -sf "$INSTALL_DIR/relaypilot.sh" "$HUB_BIN_PATH"
+  echo "Installed Hub entrypoint: $HUB_BIN_PATH"
+  echo "Run: relaypilot-hub    # Hub 面板"
+}
+
+install_agent_entrypoint() {
+  mkdir -p "$(dirname "$AGENT_BIN_PATH")"
+  ln -sf "$INSTALL_DIR/relaypilot.sh" "$AGENT_BIN_PATH"
+  echo "Installed Agent entrypoint: $AGENT_BIN_PATH"
+  echo "Run: relaypilot-agent  # Agent 面板"
+}
 
 if [[ $# -gt 0 ]]; then
   case "${1:-}" in
     hub|--hub)
       shift || true
+      install_hub_entrypoint
       "$HUB_BIN_PATH" install "$@"
       ;;
     agent|--agent)
       shift || true
+      install_agent_entrypoint
       "$AGENT_BIN_PATH" install "$@"
       ;;
     menu|--menu|interactive|--interactive)
@@ -107,6 +117,7 @@ if [[ $# -gt 0 ]]; then
     --enroll|--invite)
       if [[ $# -lt 2 ]]; then echo "ERROR: $1 requires an invite value" >&2; exit 1; fi
       invite="$2"; shift 2
+      install_agent_entrypoint
       case "${RELAYPILOT_INSTALL_ENROLL_MODE:-}" in
         join|interactive)
           "$AGENT_BIN_PATH" join --invite "$invite" "$@"
@@ -126,6 +137,7 @@ if [[ $# -gt 0 ]]; then
     --bundle)
       if [[ $# -lt 2 ]]; then echo "ERROR: --bundle requires a value" >&2; exit 1; fi
       bundle="$2"; shift 2
+      install_agent_entrypoint
       "$AGENT_BIN_PATH" enroll --bundle "$bundle" --install-service "$@"
       ;;
     *)

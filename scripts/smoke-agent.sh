@@ -23,6 +23,15 @@ assert_text_before() {
   fi
 }
 
+assert_path_absent() {
+  local path="$1"
+  if [[ -e "$path" || -L "$path" ]]; then
+    echo "expected path to be absent: $path" >&2
+    ls -l "$path" >&2 || true
+    exit 1
+  fi
+}
+
 json_string_field() {
   local key="$1" file="$2"
   grep -m1 "\"$key\"" "$file" | sed -E 's/^[^:]+:[[:space:]]*"([^"]*)".*$/\1/'
@@ -836,12 +845,16 @@ INSTALL_DIR="$ROOT/update-dir" \
 BIN_PATH="$ROOT/bin/relaypilot-updated" \
 RELAYPILOT_NO_ROOT=1 \
 bash ./relaypilot.sh services > "$ROOT/update-menu-skip.out" 2> "$ROOT/update-menu-skip.err"
+ln -sf "$ROOT/update-dir/relaypilot.sh" "$ROOT/bin/relaypilot-hub"
+ln -sf "$ROOT/update-dir/relaypilot.sh" "$ROOT/bin/relaypilot-agent"
 RAW_BASE="file://$ROOT/raw" \
 RELEASE_BASE="file://$ROOT/release" \
 INSTALL_DIR="$ROOT/update-dir" \
 BIN_PATH="$ROOT/bin/relaypilot-updated" \
 RELAYPILOT_NO_ROOT=1 \
 bash ./relaypilot.sh update --version v-local --force --no-restart-services > "$ROOT/update-force.out" 2> "$ROOT/update-force.err"
+assert_path_absent "$ROOT/bin/relaypilot-hub"
+assert_path_absent "$ROOT/bin/relaypilot-agent"
 mkdir -p "$ROOT/fake-update-bin"
 cat > "$ROOT/fake-update-bin/systemctl" <<'EOF_SYSTEMCTL'
 #!/usr/bin/env bash
@@ -880,6 +893,8 @@ INSTALL_DIR="$ROOT/relay-installer" \
 BIN_PATH="$ROOT/bin/relaypilot-installed" \
 RELAYPILOT_NO_ROOT=1 \
 bash ./install-relaypilot.sh > "$ROOT/installer-noninteractive.out" 2> "$ROOT/installer-noninteractive.err"
+assert_path_absent "$ROOT/bin/relaypilot-hub"
+assert_path_absent "$ROOT/bin/relaypilot-agent"
 
 mkdir -p "$ROOT/raw-enroll" "$ROOT/release-enroll/v-local"
 cat > "$ROOT/raw-enroll/relaypilot.sh" <<'EOF_STUB_ENTRYPOINT'
@@ -937,6 +952,8 @@ RELAYPILOT_NO_ROOT=1 \
 bash ./install-relaypilot.sh menu > "$ROOT/installer-menu.out" 2> "$ROOT/installer-menu.err"
 INSTALL_DIR="$ROOT/install-dir" \
 BIN_PATH="$ROOT/bin/relaypilot-self" \
+HUB_BIN_PATH="$ROOT/bin/relaypilot-self-hub" \
+AGENT_BIN_PATH="$ROOT/bin/relaypilot-self-agent" \
 RELAYPILOT_NO_ROOT=1 \
 bash ./relaypilot.sh install > "$ROOT/install.out" 2> "$ROOT/install.err"
 
@@ -952,34 +969,52 @@ grep -q '下载 Go core' "$ROOT/update-force.out"
 [[ -x "$ROOT/update-dir/relaypilot.sh" ]]
 [[ -x "$ROOT/update-dir/bin/relaypilot" ]]
 [[ -L "$ROOT/bin/relaypilot-updated" || -x "$ROOT/bin/relaypilot-updated" ]]
-[[ -L "$ROOT/bin/relaypilot-hub" || -x "$ROOT/bin/relaypilot-hub" ]]
-[[ -L "$ROOT/bin/relaypilot-agent" || -x "$ROOT/bin/relaypilot-agent" ]]
 grep -q 'Installed entrypoint' "$ROOT/installer-noninteractive.out"
-grep -q 'Installed Hub entrypoint' "$ROOT/installer-noninteractive.out"
-grep -q 'Installed Agent entrypoint' "$ROOT/installer-noninteractive.out"
-grep -q 'Run: relaypilot-hub' "$ROOT/installer-noninteractive.out"
-grep -q 'Run: relaypilot-agent' "$ROOT/installer-noninteractive.out"
+! grep -q 'Installed Hub entrypoint' "$ROOT/installer-noninteractive.out"
+! grep -q 'Installed Agent entrypoint' "$ROOT/installer-noninteractive.out"
+! grep -q 'Run: relaypilot-hub' "$ROOT/installer-noninteractive.out"
+! grep -q 'Run: relaypilot-agent' "$ROOT/installer-noninteractive.out"
 ! grep -q '^RelayPilot$' "$ROOT/installer-noninteractive.out"
 grep -q '^enroll --invite INVITE_SMOKE --install-service$' "$ROOT/install-enroll-auto.log"
 grep -q '^join --invite INVITE_SMOKE$' "$ROOT/install-enroll-join.log"
 grep -q '^install$' "$ROOT/install-hub-mode.log"
 grep -q '^install$' "$ROOT/install-agent-mode.log"
+[[ -L "$ROOT/bin/relaypilot-hub" || -x "$ROOT/bin/relaypilot-hub" ]]
+[[ -L "$ROOT/bin/relaypilot-agent" || -x "$ROOT/bin/relaypilot-agent" ]]
 grep -q 'RelayPilot 安装' "$ROOT/installer-menu.out"
 grep -q '安装/进入 Hub' "$ROOT/installer-menu.out"
 grep -q '安装/进入 Agent' "$ROOT/installer-menu.out"
 [[ -x "$ROOT/install-dir/relaypilot.sh" ]]
 [[ -L "$ROOT/bin/relaypilot-self" || -x "$ROOT/bin/relaypilot-self" ]]
-[[ -L "$ROOT/bin/relaypilot-hub" || -x "$ROOT/bin/relaypilot-hub" ]]
-[[ -L "$ROOT/bin/relaypilot-agent" || -x "$ROOT/bin/relaypilot-agent" ]]
+assert_path_absent "$ROOT/bin/relaypilot-self-hub"
+assert_path_absent "$ROOT/bin/relaypilot-self-agent"
+printf '0\n' | INSTALL_DIR="$ROOT/install-dir" \
+BIN_PATH="$ROOT/bin/relaypilot-self" \
+HUB_BIN_PATH="$ROOT/bin/relaypilot-self-hub" \
+AGENT_BIN_PATH="$ROOT/bin/relaypilot-self-agent" \
+RELAYPILOT_NO_ROOT=1 \
+bash "$ROOT/install-dir/relaypilot.sh" hub > "$ROOT/install-self-hub.out" 2> "$ROOT/install-self-hub.err"
+printf '0\n' | INSTALL_DIR="$ROOT/install-dir" \
+BIN_PATH="$ROOT/bin/relaypilot-self" \
+HUB_BIN_PATH="$ROOT/bin/relaypilot-self-hub" \
+AGENT_BIN_PATH="$ROOT/bin/relaypilot-self-agent" \
+RELAYPILOT_NO_ROOT=1 \
+bash "$ROOT/install-dir/relaypilot.sh" agent > "$ROOT/install-self-agent.out" 2> "$ROOT/install-self-agent.err"
+[[ -L "$ROOT/bin/relaypilot-self-hub" || -x "$ROOT/bin/relaypilot-self-hub" ]]
+[[ -L "$ROOT/bin/relaypilot-self-agent" || -x "$ROOT/bin/relaypilot-self-agent" ]]
 
 INSTALL_DIR="$ROOT/install-dir" \
 BIN_PATH="$ROOT/bin/relaypilot-self" \
+HUB_BIN_PATH="$ROOT/bin/relaypilot-self-hub" \
+AGENT_BIN_PATH="$ROOT/bin/relaypilot-self-agent" \
 STATE_DIR="$ROOT/state" \
 KEEP_STATE=1 \
 RELAYPILOT_NO_ROOT=1 \
 bash ./relaypilot.sh uninstall --yes > "$ROOT/uninstall.out" 2> "$ROOT/uninstall.err"
 [[ ! -e "$ROOT/install-dir" ]]
 [[ ! -e "$ROOT/bin/relaypilot-self" ]]
+assert_path_absent "$ROOT/bin/relaypilot-self-hub"
+assert_path_absent "$ROOT/bin/relaypilot-self-agent"
 [[ -d "$ROOT/state" ]]
 
 [[ -f "$ROOT/config.json" ]]
